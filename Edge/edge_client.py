@@ -417,12 +417,9 @@ class EdgeClient:
         self.mqtt_client.on_connect = self._on_mqtt_connect
         self.mqtt_client.on_message = self._on_mqtt_message
 
-        # Initialize Edge_Handler only if available (optional for simple tests)
-        if EDGE_HANDLER_AVAILABLE and Edge_Handler:
-            self.edge_handler = Edge_Handler(self._on_handler_update)
-        else:
-            self.edge_handler = None
-            print("[EdgeClient] Edge_Handler not available - only basic MQTT commands will work")
+        # Edge_Handler is deprecated in this workflow.
+        # Waylon_Handler (via waylon_handler_adapter) is the source of truth for model tasks.
+        self.edge_handler = None
 
     def _on_handler_update(self, update_type, data):
         """
@@ -508,15 +505,13 @@ class EdgeClient:
                 
                 # Check if this is a model-related task (has question/prompt/query)
                 has_task = any(key in payload for key in ["question", "prompt", "query", "task_type"])
-                
+
                 if has_task:
-                    # This is a command for the handler - route it
-                    if self.edge_handler:
-                        print(f"[EdgeClient] Routing command to handler: {list(payload.keys())}")
-                        self.edge_handler.process_command(payload)
-                    else:
-                        print(f"[EdgeClient] Handler not available, cannot process task command")
-                        self.update_queue.put(("mqtt", payload_str))
+                    # Route ALL model tasks to Waylon_Handler (source of truth)
+                    print(f"[EdgeClient] Routing task to Waylon_Handler: {list(payload.keys())}")
+                    self._handle_handler_test_command(payload)
+                    return
+
                 else:
                     # Unknown command format
                     print(f"[EdgeClient] Received unknown command format, queueing for manual handling")
@@ -738,7 +733,7 @@ class EdgeClient:
 # ------------------------------------------------------------
 if __name__ == "__main__":
     # Set the Raspberry Pi MQTT broker IP here
-    MQTT_BROKER_IP = "10.148.0.94"  # ← update to your Pi's broker IP (same as host_client.py)
+    MQTT_BROKER_IP = "10.148.0.95"  # ← update to your Pi's broker IP (same as host_client.py)
     
     print("="*60)
     print("Edge Client - System Info Responder & MQTT Handler")
