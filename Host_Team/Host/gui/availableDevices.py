@@ -392,12 +392,12 @@ class MainWindow(QMainWindow):
     def set_discover_callback(self, callback):
         """Set the callback function to be called when Discover is clicked.
         
-        The callback should send a discovery_request packet as per packetStructure.md:
+        The callback should send a discovery packet as per packetStructure.md:
         {
             "header": {
                 "timestamp": "<ISO-8601>",
                 "source_device": "<host_name>",
-                "message_type": "discovery_request"
+                "message_type": "discovery"
             },
             "body": {}
         }
@@ -439,6 +439,12 @@ class MainWindow(QMainWindow):
         # Recreate device rows
         for device in devices:
             self._create_device_row(device, panel_layout)
+        
+        panel_layout.invalidate()
+        self.devices_panel.adjustSize()
+        self.devices_panel.update()
+        self.devices_panel.repaint()
+
     
     def add_device(self, device: dict):
         """Add a new device to the list."""

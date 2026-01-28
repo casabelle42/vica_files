@@ -1313,7 +1313,7 @@ def launch_main_application(username: str = "") -> None:
     Called after successful sign-in.
     """
     from PyQt6.QtWidgets import QApplication
-    from Host.gui.availibleDevices import MainWindow
+    from Host_Team.Host.gui.availableDevices import MainWindow
     
     app = QApplication(sys.argv)
     window = MainWindow()

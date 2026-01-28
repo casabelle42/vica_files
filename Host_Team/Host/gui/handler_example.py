@@ -41,7 +41,7 @@ if project_root not in sys.path:
 
 from PyQt6.QtWidgets import QApplication
 from Host.gui.gui_handler import GUIHandler
-from Host.gui.availibleDevices import MainWindow as AvailableDevicesWindow
+from Host_Team.Host.gui.availableDevices import MainWindow as AvailableDevicesWindow
 from Host.gui.query import MainWindow as QueryWindow
 
 # Setup logging

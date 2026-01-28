@@ -106,8 +106,8 @@ def main():
     print("Host → Pi → Nano: System Info Request")
     print("="*60)
 
-    # Set the Raspberry Pi MQTT broker IP here
-    MQTT_BROKER_IP = "10.148.0.94"  # ← update to your Pi's broker IP
+    # Set the NUC MQTT broker IP here
+    MQTT_BROKER_IP = "10.148.0.95"  
 
     requester = HostSystemInfoRequester(mqtt_broker=MQTT_BROKER_IP)
 

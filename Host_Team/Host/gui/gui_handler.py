@@ -5,7 +5,7 @@ Maps incoming JSON commands to GUI functions and updates GUI elements.
 
 import json
 import logging
-from typing import Any, Dict, Optional, List
+from typing import Any, Dict, Optional, List, Callable
 from PyQt6.QtCore import QObject, pyqtSignal, QTimer
 from PyQt6.QtGui import QPixmap
 from PyQt6.QtWidgets import QApplication, QLabel
@@ -24,7 +24,9 @@ class GUIHandler(QObject):
     # Signals for async operations
     command_processed = pyqtSignal(str, dict)  # command_type, result
     
-    def __init__(self, available_devices_window=None, query_window=None):
+    def __init__(self, available_devices_window=None, query_window=None,
+                 on_discover: Optional[Callable[[], None]] = None,
+                 on_query: Optional[Callable[[str], None]] = None):
         """
         Initialize the GUI handler.
         
@@ -35,6 +37,14 @@ class GUIHandler(QObject):
         super().__init__()
         self.available_devices_window = available_devices_window
         self.query_window = query_window
+
+        # Network callbacks (typically set to publish MQTT packets)
+        self._on_discover_callback = on_discover
+        self._on_query_callback = on_query
+
+        # Install UI->handler hooks so *real user clicks* trigger callbacks
+        self._install_ui_hooks()
+
         
         # Store widget references for updates
         self._widget_refs = {}
@@ -129,8 +139,9 @@ class GUIHandler(QObject):
         if self.available_devices_window:
             self.available_devices_window._open_query_window()
             # Update handler's query window reference if it was just created
-            if self.available_devices_window._query_window and not self.query_window:
+            if self.available_devices_window._query_window and (not self.query_window or self.query_window is not self.available_devices_window._query_window):
                 self.query_window = self.available_devices_window._query_window
+                self._bind_query_window_callbacks(self.query_window)
             return {"message": "Query window opened"}
         return {"message": "Available devices window not available"}
     
@@ -429,6 +440,76 @@ class GUIHandler(QObject):
         """Click the Send button in query window."""
         return self._handle_send_query(params)
     
+    
+    # ==================== UI Callback Wiring ====================
+
+    def set_network_callbacks(self,
+                              on_discover: Optional[Callable[[], None]] = None,
+                              on_query: Optional[Callable[[str], None]] = None) -> None:
+        """Register functions that will be invoked when the user clicks UI buttons.
+
+        Typical usage: pass functions that publish MQTT packets for discovery/query.
+        """
+        self._on_discover_callback = on_discover
+        self._on_query_callback = on_query
+
+        # Re-apply hooks in case windows were created after init
+        self._install_ui_hooks()
+
+    def _install_ui_hooks(self) -> None:
+        """Attach window callbacks so the UI can trigger network actions."""
+        # Hook Discover button -> handler callback
+        if self.available_devices_window and hasattr(self.available_devices_window, "set_discover_callback"):
+            try:
+                self.available_devices_window.set_discover_callback(self._handle_ui_discover_clicked)
+            except Exception as e:
+                logger.warning(f"Failed to set discover callback: {e}")
+
+        # Wrap query window creation so we can bind the send callback every time it opens
+        if self.available_devices_window and hasattr(self.available_devices_window, "_open_query_window"):
+            if not hasattr(self.available_devices_window, "_gui_handler_wrapped_open_query"):
+                original_open = self.available_devices_window._open_query_window
+
+                def wrapped_open_query_window():  # noqa: ANN001
+                    original_open()
+                    # Grab the created window reference
+                    try:
+                        qw = getattr(self.available_devices_window, "_query_window", None)
+                        if qw:
+                            self.query_window = qw
+                            self._bind_query_window_callbacks(qw)
+                    except Exception as e:
+                        logger.warning(f"Failed to bind query window after open: {e}")
+
+                self.available_devices_window._open_query_window = wrapped_open_query_window
+                setattr(self.available_devices_window, "_gui_handler_wrapped_open_query", True)
+
+        # If a query window already exists, bind it now
+        if self.query_window:
+            self._bind_query_window_callbacks(self.query_window)
+
+    def _bind_query_window_callbacks(self, query_window) -> None:
+        """Bind the Send button behavior to the handler's on_query callback."""
+        if hasattr(query_window, "set_query_callback"):
+            try:
+                query_window.set_query_callback(self._handle_ui_query_sent)
+            except Exception as e:
+                logger.warning(f"Failed to set query callback: {e}")
+
+    def _handle_ui_discover_clicked(self) -> None:
+        """Called when the user clicks Discover in the Available Devices UI."""
+        if self._on_discover_callback:
+            self._on_discover_callback()
+        else:
+            logger.info("[GUIHandler] Discover clicked, but no network callback registered")
+
+    def _handle_ui_query_sent(self, query_text: str) -> None:
+        """Called when the user clicks Send in the Query UI."""
+        if self._on_query_callback:
+            self._on_query_callback(query_text)
+        else:
+            logger.info(f"[GUIHandler] Query sent '{query_text}', but no network callback registered")
+
     # ==================== Helper Methods ====================
     
     def _get_query_window(self):
