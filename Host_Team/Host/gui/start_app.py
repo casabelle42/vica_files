@@ -7,7 +7,7 @@ commands using the existing HostCommandSender class.
 
 This keeps code separated:
 - GUI stays in Host/gui/*
-- GUI logic mapping stays in Host/gui/gui_handler.py (patched)
+- GUI logic mapping stays in Host/gui/gui_handler.py 
 - MQTT request/response stays in host_client.py
 - This file ONLY wires them together and runs the app.
 """
