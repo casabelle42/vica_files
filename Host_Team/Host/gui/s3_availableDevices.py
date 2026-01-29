@@ -15,15 +15,18 @@ from PyQt6.QtWidgets import (
 import sys
 import os
 
-# Add project root to path for imports
-# File is at: project_root/Host/gui/availibleDevices.py
-# Need to go up 2 levels: Host/gui -> Host -> project_root
+# Add necessary paths for imports
 current_file = os.path.abspath(__file__)
-project_root = os.path.dirname(os.path.dirname(os.path.dirname(current_file)))
-if project_root not in sys.path:
-    sys.path.insert(0, project_root)
+current_dir = os.path.dirname(current_file)  # Host/gui/
+host_dir = os.path.dirname(current_dir)  # Host/
+host_team_dir = os.path.dirname(host_dir)  # Host_Team/
+project_root = os.path.dirname(host_team_dir)  # project root
 
-from Host.gui.query import MainWindow as QueryWindow
+for path in [current_dir, host_dir, host_team_dir, project_root]:
+    if path not in sys.path:
+        sys.path.insert(0, path)
+
+from s4_query import MainWindow as QueryWindow
 
 
 class CardWidget(QWidget):

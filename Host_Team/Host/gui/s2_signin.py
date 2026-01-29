@@ -7,11 +7,16 @@ import os
 import sys
 from tkinter import messagebox
 
-# Add project root to path for imports
+# Add necessary paths for imports
 current_file = os.path.abspath(__file__)
-project_root = os.path.dirname(os.path.dirname(os.path.dirname(current_file)))
-if project_root not in sys.path:
-    sys.path.insert(0, project_root)
+current_dir = os.path.dirname(current_file)  # Host/gui/
+host_dir = os.path.dirname(current_dir)  # Host/
+host_team_dir = os.path.dirname(host_dir)  # Host_Team/
+project_root = os.path.dirname(host_team_dir)  # project root
+
+for path in [current_dir, host_dir, host_team_dir, project_root]:
+    if path not in sys.path:
+        sys.path.insert(0, path)
 
 
 @dataclass
@@ -1313,7 +1318,7 @@ def launch_main_application(username: str = "") -> None:
     Called after successful sign-in.
     """
     from PyQt6.QtWidgets import QApplication
-    from Host_Team.Host.gui.availableDevices import MainWindow
+    from s3_availableDevices import MainWindow
     
     app = QApplication(sys.argv)
     window = MainWindow()

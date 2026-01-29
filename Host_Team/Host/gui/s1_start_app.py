@@ -19,20 +19,21 @@ import socket
 import threading
 from datetime import datetime
 from typing import Any, Dict, List, Optional
-import availableDevices
-
 from PyQt6.QtWidgets import QApplication
 from PyQt6.QtCore import QTimer, QObject, pyqtSignal
 
 
-# ---- Ensure project root is importable (same style as start_app.py) ----
+# ---- Ensure project root is importable ----
 current_dir = os.path.dirname(os.path.abspath(__file__))
-project_root = os.path.dirname(current_dir)  # Host/
-project_root = os.path.dirname(project_root)  # project root
-if project_root not in sys.path:
-    sys.path.insert(0, project_root)
+host_dir = os.path.dirname(current_dir)  # Host/
+host_team_dir = os.path.dirname(host_dir)  # Host_Team/
+project_root = os.path.dirname(host_team_dir)  # project root
 
-from availableDevices import MainWindow as AvailableDevicesWindow
+for path in [current_dir, host_dir, host_team_dir, project_root]:
+    if path not in sys.path:
+        sys.path.insert(0, path)
+
+from s3_availableDevices import MainWindow as AvailableDevicesWindow
 from gui_handler import GUIHandler
 from host_client import HostCommandSender
 
