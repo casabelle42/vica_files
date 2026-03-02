@@ -221,6 +221,51 @@ class ModelService:
         self.frame_counter = 0
         self.running = True
 
+    @property
+    def paused(self) -> bool:
+        """Expose model pause state for handler (e.g. status thread, cancel_query)."""
+        return self.model.paused
+
+    @paused.setter
+    def paused(self, value: bool) -> None:
+        self.model.paused = value
+
+    def start(self) -> Optional[bool]:
+        """
+        Initialize container, load model, and start camera worker.
+        Used by EdgeHandler: synchronous startup, no TCP client connection.
+        Returns True on success, False on failure, None for soft failure.
+        """
+        try:
+            ensure_container_running()
+            self.model.load()
+            self.cam_worker.start()
+            return True
+        except Exception as e:
+            print(f"[ModelService.start] error: {e}")
+            return False
+
+    def run_inference(self, query_text: str) -> Dict[str, Any]:
+        """
+        Run one-shot VLM inference for the given query (used by EdgeHandler).
+        Sets current query, grabs one frame, runs model.infer(), returns dict
+        with "image" (base64 JPEG) and "results" (text from model output).
+        """
+        self.model.set_query(query_text)
+        self.model.paused = False
+        try:
+            frame = self.frames.get(timeout=2.0)
+        except queue.Empty:
+            return {"image": "", "results": "no frame available"}
+        result = self.model.infer(frame)
+        img_b64 = encode_jpeg_b64(frame)
+        summary = result.get("summary", "")
+        dets = result.get("detections", [])
+        results_text = summary
+        if dets:
+            results_text = summary + " " + json.dumps(dets)
+        return {"image": img_b64, "results": results_text.strip()}
+
     def send_status(self, state: str, extra: Optional[Dict[str, Any]] = None):
         payload = {
             "type": "status",
@@ -340,3 +385,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
