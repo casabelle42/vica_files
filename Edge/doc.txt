@@ -1,5 +1,0 @@
-Current architecture is planned like this:
-
-Edge Client does all communication. Receives updates from Edge_Handler and Model_Init. EdgeClient instantiates Edge_Handler which then does Model_Init. The return values
-then get sent to Edge Client and formatted to get returned to the network.
-
