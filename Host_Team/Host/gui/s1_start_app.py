@@ -90,6 +90,36 @@ class UiDispatcher(QObject):
         self._window = window
         self.update_devices_signal.connect(self._window.update_devices)
 
+class QueryUiDispatcher(QObject):
+    add_returned_image_signal = pyqtSignal(str, dict)
+    update_metadata_signal = pyqtSignal(dict)
+
+    def __init__(self, devices_window):
+        super().__init__()
+        self._devices_window = devices_window
+        self.add_returned_image_signal.connect(self._add_returned_image)
+        self.update_metadata_signal.connect(self._update_metadata)
+
+    def _get_or_open_query_window(self):
+        try:
+            qw = getattr(self._devices_window, "_query_window", None)
+            if qw is None or not qw.isVisible():
+                self._devices_window._open_query_window()
+                qw = getattr(self._devices_window, "_query_window", None)
+            return qw
+        except Exception:
+            return None
+
+    def _add_returned_image(self, image_data: str, metadata: dict) -> None:
+        qw = self._get_or_open_query_window()
+        if qw and hasattr(qw, "add_returned_image"):
+            qw.add_returned_image(image_data, metadata or {})
+
+    def _update_metadata(self, metadata: dict) -> None:
+        qw = self._get_or_open_query_window()
+        if qw and hasattr(qw, "update_metadata"):
+            qw.update_metadata(metadata or {})
+
 def main():
     # ---- CONFIG ----
     MQTT_BROKER_IP = os.environ.get("VICA_MQTT_BROKER", "10.148.0.95")
@@ -115,6 +145,7 @@ def main():
     devices_window.show()
 
     ui = UiDispatcher(devices_window)
+    query_ui = QueryUiDispatcher(devices_window)
 
 
     # ---- MQTT sender (existing class) ----
@@ -198,8 +229,36 @@ def main():
                 resp = sender.send_command(cmd, reply_topic=QUERY_REPLY_TOPIC, timeout=30.0)
                 print(f"[HOST_MAIN] Query response: {json.dumps(resp, indent=2)[:4000]}")
 
-                # TODO: If response contains images/metadata, forward into GUIHandler.
-                # For now, you can extend this once edge publishes a proper query_response packet.
+                # If response contains images/metadata, forward into the Query UI.
+                try:
+                    body = resp.get("body") if isinstance(resp, dict) else None
+                    header = resp.get("header") if isinstance(resp, dict) else None
+                    if isinstance(body, dict):
+                        md = body.get("metadata") or {}
+                        frame = body.get("frame") or {}
+                        image_b64 = ""
+                        if isinstance(md, dict):
+                            image_b64 = md.get("image_base64") or ""
+
+                        # Build metadata fields expected by s4_query.MainWindow.update_metadata
+                        edge_name = ""
+                        if isinstance(header, dict):
+                            edge_name = header.get("source_device") or ""
+
+                        gui_md = {
+                            "image": "response",
+                            "edge_device": edge_name or "edge",
+                            "query": query_text,
+                            "response": body.get("response_text") or "query_response",
+                            "confidence_rate": "",
+                            "time_processed": (header.get("timestamp") if isinstance(header, dict) else "") or "",
+                        }
+
+                        if image_b64:
+                            query_ui.add_returned_image_signal.emit(image_b64, {"timestamp": frame.get("timestamp", ""), "confidence": ""})
+                            query_ui.update_metadata_signal.emit(gui_md)
+                except Exception as e:
+                    print(f"[HOST_MAIN] Failed to update Query UI from response: {e!r}")
 
             except Exception as e:
                 print(f"[HOST_MAIN] Query failed: {e}")
@@ -208,8 +267,14 @@ def main():
 
     # Tell the handler which functions to call for real user clicks
     handler.set_network_callbacks(on_discover=on_discover_clicked, on_query=on_query_sent)
+    # Ensure query callback is available at query-window creation time
+    if hasattr(devices_window, "set_query_callback"):
+        try:
+            devices_window.set_query_callback(on_query_sent)
+        except Exception as e:
+            print(f"[HOST_MAIN] Failed to set query callback on devices window: {e!r}")
 
-    print("[HOST_MAIN] ✅ GUI is running. Use Discover to test MQTT path.")
+    print("[HOST_MAIN] GUI is running. Use Discover to test MQTT path.")
     sys.exit(app.exec())
 
 
