@@ -14,7 +14,8 @@ class MQTTHostClient:
 
         self.outgoing_queue = queue.Queue()
         self.incoming_queue = queue.Queue()
-
+        self.device_status_cache = {}
+        
         self.mqtt_client = mqtt.Client()
         self.mqtt_client.on_connect = self._on_mqtt_connect
         self.mqtt_client.on_message = self._on_mqtt_message
