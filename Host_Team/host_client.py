@@ -35,17 +35,6 @@ class MQTTHostClient:
     # ------------------------
     # MQTT callbacks
     # ------------------------
-    def _on_mqtt_connect(self, client, userdata, flags, rc):
-        if rc == 0:
-            print(f"[MQTTHostClient] ✅ Connected to {self.mqtt_broker}:{self.mqtt_port}")
-            # Subscribe FIRST inside on_connect — broker confirms before we publish anything
-            client.subscribe("host/results")
-            print("[MQTTHostClient] Subscribed to host/results")
-            # NOW safe to send discovery — subscription is guaranteed active
-            self._send_discovery_on_connect()
-        else:
-            print(f"[MQTTHostClient] ❌ Connection failed rc={rc}")
-
     def _send_discovery_on_connect(self):
         """Called from on_connect — subscription is live before this fires."""
         pkt = {
@@ -60,6 +49,27 @@ class MQTTHostClient:
         payload = json.dumps(pkt, separators=(",", ":"), ensure_ascii=False)
         self.mqtt_client.publish("host/control", payload)
         print("[MQTTHostClient] 🔍 Sent discovery request")
+        
+    def _on_mqtt_connect(self, client, userdata, flags, rc):
+        if rc == 0:
+            print(f"[MQTTHostClient] ✅ Connected to {self.mqtt_broker}:{self.mqtt_port}")
+            # Subscribe FIRST inside on_connect — broker confirms before we publish anything
+            client.subscribe("host/results")
+            print("[MQTTHostClient] Subscribed to host/results")
+            # NOW safe to send discovery — subscription is guaranteed active
+            self._send_discovery_on_connect()
+        else:
+            print(f"[MQTTHostClient] ❌ Connection failed rc={rc}")
+
+    def _on_mqtt_message(self, client, userdata, msg):
+        try:
+            payload_str = msg.payload.decode()
+            print(f"[MQTTHostClient] Received on {msg.topic}: {payload_str[:300]}")
+            pkt = json.loads(payload_str)
+            self.incoming_queue.put(pkt)
+            self._handle_incoming(pkt)
+        except Exception as e:
+            print(f"[MQTTHostClient] Error handling message: {e}")
 
     # ------------------------
     # Incoming packet handler
