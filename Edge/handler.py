@@ -8,8 +8,7 @@ import json
 import uuid
 from datetime import datetime
 import platform
-import socket
-import base64
+from model_init import ModelService, CFG
 import requests
 
 class EdgeHandler:
@@ -30,31 +29,10 @@ class EdgeHandler:
         self._stop_event = threading.Event()
         self._ready = False
         self._status_thread = None
-        self._cfg = None  # loaded lazily to avoid heavy deps in mock mode
 
         self.logger.info("Initializing EdgeHandler...")
-
-        # Local dev convenience: allow running "edge" behavior without Docker/model.
-        self._mock_mode = os.environ.get("VICA_EDGE_MOCK_MODE", "0").strip() in {"1", "true", "True", "yes", "YES"}
-        if self._mock_mode:
-            self.logger.info("Mock mode enabled (VICA_EDGE_MOCK_MODE=1) — skipping model container startup.")
-            self._ready = True
-        else:
-            self._start_model_container()
+        self._start_model_container()
         self._start_status_thread()
-
-    def _load_test_image_base64(self) -> str:
-        """Load a local test image (if present) and return base64."""
-        # Prefer the GUI test images if they exist in the repo
-        project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        candidate_paths = [
-            os.path.join(project_root, "Host_Team", "Host", "gui", "tests", "test_images", "person_behind_car_01.jpg"),
-        ]
-        for p in candidate_paths:
-            if os.path.exists(p):
-                with open(p, "rb") as f:
-                    return base64.b64encode(f.read()).decode("utf-8")
-        return ""
 
     # ------------------------------------------------------------
     # Setup and Lifecycle
@@ -118,10 +96,6 @@ class EdgeHandler:
                 action = packet.get("action", "").lower()
                 if command == "stop" or action == "stop":
                     return "cancel_query_request", {"query_id": packet.get("query_id", str(uuid.uuid4()))}, True
-
-                # Legacy command packets used by HostCommandSender / Host GUI MQTT wiring
-                if command in {"discover", "get_system_info", "query"}:
-                    return "legacy_command", packet, True
             
             # Legacy format: plain dict, treat as query_request
             return "query_request", {"query": packet_str, "query_id": str(uuid.uuid4())}, True
@@ -218,10 +192,6 @@ class EdgeHandler:
         Start the model container and ModelService (from model_init.py)
         in a background thread, and update readiness when initialized.
         """
-        # Import lazily so local dev/mock mode doesn't require cv2/docker deps.
-        from model_init import ModelService, CFG  # noqa: WPS433
-        self._cfg = CFG
-
         # Step 1: Check if container exists and clean it up before starting
         container_name = CFG.CONTAINER_NAME
         if self._check_container_exists(container_name):
@@ -344,19 +314,12 @@ class EdgeHandler:
             self.logger.info(f"Received cancel_query_request (query_id={query_id}). Handling container shutdown...")
             
             # Stop and remove the container
-            if self._mock_mode:
-                self.logger.info("Mock mode: skipping container shutdown.")
+            container_name = CFG.CONTAINER_NAME
+            if self._check_container_exists(container_name):
+                self.logger.info(f"Stopping and removing container: {container_name}")
+                self._stop_and_remove_container(container_name)
             else:
-                # Ensure CFG is available (in case cancel arrives early)
-                if self._cfg is None:
-                    from model_init import CFG  # noqa: WPS433
-                    self._cfg = CFG
-                container_name = self._cfg.CONTAINER_NAME
-                if self._check_container_exists(container_name):
-                    self.logger.info(f"Stopping and removing container: {container_name}")
-                    self._stop_and_remove_container(container_name)
-                else:
-                    self.logger.info(f"Container {container_name} does not exist.")
+                self.logger.info(f"Container {container_name} does not exist.")
             
             # Stop ModelService if it exists
             if self.model_service:
@@ -468,92 +431,6 @@ class EdgeHandler:
                 }
                 error_packet = self._create_packet("query_response", error_body)
                 return json.dumps(error_packet)
-
-        # Handle legacy command packets (sent by HostCommandSender over MQTT)
-        if message_type == "legacy_command":
-            command = (body.get("command") or "").lower().strip()
-            request_id = body.get("request_id")
-
-            if command == "discover":
-                try:
-                    ip = socket.gethostbyname(socket.gethostname())
-                except Exception:
-                    ip = ""
-
-                resp = {
-                    "type": "discovery_response",
-                    "request_id": request_id,
-                    "devices": [{
-                        "device_name": platform.node(),
-                        "device_id": platform.node(),
-                        "ip": ip,
-                        "status": "online",
-                    }],
-                }
-                return json.dumps(resp)
-
-            if command == "get_system_info":
-                cpu_percent = psutil.cpu_percent(interval=None)
-                vm = psutil.virtual_memory()
-                resp = {
-                    "type": "system_info",
-                    "request_id": request_id,
-                    "timestamp": int(time.time()),
-                    "cpu": {"percent": float(cpu_percent)},
-                    "ram": {
-                        "total_mb": int(vm.total / (1024 * 1024)),
-                        "used_mb": int(vm.used / (1024 * 1024)),
-                        "percent": float(vm.percent),
-                    },
-                    "cuda_available": False,
-                }
-                return json.dumps(resp)
-
-            if command == "query":
-                query_text = (body.get("query") or "").strip()
-                if not query_text:
-                    return None
-
-                # If we're in mock mode (or model isn't available), respond with a canned test image.
-                if self._mock_mode or (not self._ready or not self.model_service):
-                    image_base64 = self._load_test_image_base64()
-                    query_id = request_id or str(uuid.uuid4())
-                    resp = {
-                        "header": {
-                            "timestamp": datetime.now().isoformat(),
-                            "source_device": platform.node(),
-                            "message_type": "query_response",
-                        },
-                        "body": {
-                            "query_id": query_id,
-                            "metadata": {
-                                "image_width": 800,
-                                "image_height": 600,
-                                "format": "jpeg",
-                                "image_base64": image_base64,
-                                "chunk_index": 0,
-                                "total_chunks": 1,
-                            },
-                            "frame": {
-                                "frame_id": 0,
-                                "timestamp": datetime.now().isoformat(),
-                                "detections": [
-                                    {
-                                        "label": "person",
-                                        "confidence": 0.92,
-                                        "dets": ["mock_detection"],
-                                        "bbox": [100, 150, 160, 350],
-                                    }
-                                ],
-                            },
-                            "response_text": "Mock edge response (no model): returned a test image.",
-                        },
-                        "request_id": query_id,
-                    }
-                    return json.dumps(resp)
-
-                # Otherwise, treat it as a normal query_request (runs model pipeline)
-                return self.process_query(json.dumps({"query": query_text, "query_id": request_id or str(uuid.uuid4())}))
         
         # Unknown message type
         self.logger.warning(f"Unknown message_type: {message_type}")

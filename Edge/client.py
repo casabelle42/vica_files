@@ -47,11 +47,11 @@ class MQTTEdgeClient:
     # ------------------------
     def _on_mqtt_connect(self, client, userdata, flags, rc):
         if rc == 0:
-            print(f"[MQTTEdgeClient] Connected to broker {self.mqtt_broker}:{self.mqtt_port}")
+            print(f"[MQTTEdgeClient] ✅ Connected to broker {self.mqtt_broker}:{self.mqtt_port}")
             client.subscribe("edge/control")
             print("[MQTTEdgeClient] Subscribed to topic 'edge/control'")
         else:
-            print(f"[MQTTEdgeClient] Connection failed with code {rc}")
+            print(f"[MQTTEdgeClient] ❌ Connection failed with code {rc}")
 
     def _on_mqtt_message(self, client, userdata, msg):
         """
@@ -66,27 +66,15 @@ class MQTTEdgeClient:
                 payload = payload_str  # fallback: send raw string
 
             # Forward to handler and capture response
-            response_json = self.edge_handler.handle_command(payload)
+            response_json = self.edge_handler.process_query(payload_str if isinstance(payload_str, str) else json.dumps(payload))
 
-            # Publish response directly to reply_topic if provided, else to edge/results
+            # If handler returned a query_response, queue it for publishing
             if response_json:
                 try:
                     response_dict = json.loads(response_json)
-                except json.JSONDecodeError:
-                    response_dict = {"raw": response_json}
-
-                reply_topic = None
-                if isinstance(payload, dict):
-                    reply_topic = payload.get("reply_topic")
-
-                if reply_topic:
-                    try:
-                        self.mqtt_client.publish(reply_topic, json.dumps(response_dict))
-                        print(f"[MQTTEdgeClient] Published reply to {reply_topic}")
-                    except Exception as e:
-                        print(f"[MQTTEdgeClient] Error publishing reply_topic response: {e}")
-                else:
-                    self._on_handler_update("handler_response", response_dict)
+                    self._on_handler_update("query_response", response_dict)
+                except json.JSONDecodeError as e:
+                    print(f"[MQTTEdgeClient] Invalid JSON from handler: {e}")
 
         except Exception as e:
             print(f"[MQTTEdgeClient] Error handling incoming MQTT message: {e}")

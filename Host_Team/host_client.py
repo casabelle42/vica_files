@@ -49,7 +49,7 @@ class HostSystemInfoRequester:
 
     def _on_connect(self, _client, _userdata, _flags, rc):
         status = "connected" if rc == 0 else f"connect_failed(rc={rc})"
-        print(f"[HOST] MQTT {status} to {self.mqtt_broker}:{self.mqtt_port}")
+        print(f"[HOST] MQTT {status} → {self.mqtt_broker}:{self.mqtt_port}")
         _client.subscribe(self.reply_topic)
         print(f"[HOST] Subscribed to reply topic: {self.reply_topic}")
 
@@ -103,7 +103,7 @@ class HostSystemInfoRequester:
 
 def main():
     print("="*60)
-    print("Host to Pi to Nano: System Info Request")
+    print("Host → Pi → Nano: System Info Request")
     print("="*60)
 
     # Set the NUC MQTT broker IP here
@@ -117,7 +117,7 @@ def main():
         response = requester.request_system_info()
         
         print("\n" + "="*60)
-        print("[HOST] Successfully received system info from Nano")
+        print("[HOST] ✅ Successfully received system info from Nano")
         print("="*60)
         
         # Format timestamp
@@ -141,7 +141,7 @@ def main():
         
         # Format CUDA info
         cuda_available = response.get("cuda_available", False)
-        cuda_status = "Available" if cuda_available else "Not Available"
+        cuda_status = "✅ Available" if cuda_available else "❌ Not Available"
         print(f"🎮 CUDA: {cuda_status}")
         
         # Print full JSON for reference
@@ -188,7 +188,7 @@ class HostCommandSender:
 
     def _on_connect(self, _client, _userdata, _flags, rc):
         status = "connected" if rc == 0 else f"connect_failed(rc={rc})"
-        print(f"[HOST] MQTT {status} to {self.mqtt_broker}:{self.mqtt_port}")
+        print(f"[HOST] MQTT {status} → {self.mqtt_broker}:{self.mqtt_port}")
 
     def _on_message(self, _client, _userdata, msg):
         try:
@@ -217,7 +217,7 @@ class HostCommandSender:
             print(f"[HOST] Request ID mismatch, ignoring message")
             return
 
-        print("[HOST] Message matches! Setting response payload")
+        print(f"[HOST] ✅ Message matches! Setting response payload")
         self._response_payload = data
         self._response_event.set()
 

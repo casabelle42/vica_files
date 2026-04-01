@@ -230,8 +230,6 @@ class MainWindow(QMainWindow):
         
         # Callback for when discovery is requested (to be set by handler)
         self._on_discover_callback = None
-        # Callback for when a query is sent from the Query window (set by host wiring)
-        self._on_query_callback = None
 
         middle_layout = middle_card.content_layout()
         middle_layout.setContentsMargins(0, 0, 0, 0)
@@ -408,21 +406,11 @@ class MainWindow(QMainWindow):
         }
         """
         self._on_discover_callback = callback
-
-    def set_query_callback(self, callback):
-        """Set the callback function to be called when Send is clicked in the Query window."""
-        self._on_query_callback = callback
     
     def _open_query_window(self):
         """Open the query window when Query button is clicked"""
         if self._query_window is None or not self._query_window.isVisible():
             self._query_window = QueryWindow()
-            # Wire query callback at creation time so Send works immediately
-            try:
-                if self._on_query_callback and hasattr(self._query_window, "set_query_callback"):
-                    self._query_window.set_query_callback(self._on_query_callback)
-            except Exception as e:
-                print(f"[AvailableDevices] Failed to bind query callback: {e!r}")
             self._query_window.show()
         else:
             self._query_window.raise_()
