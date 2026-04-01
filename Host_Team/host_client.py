@@ -58,16 +58,18 @@ class MQTTHostClient:
             print(f"\n[MQTTHostClient] 📡 Discovery response — {len(devices)} device(s):")
             for d in devices:
                 icon = "🟢" if d.get("status") == "online" else "🔴"
-                print(f"  {icon} {d.get('name')} | "
-                      f"CPU: {d.get('cpu', 0):.1f}% | "
-                      f"RAM: {d.get('ram', 0):.1f}% | "
-                      f"GPU: {d.get('gpu', 0):.1f}% | "
-                      f"Processing: {d.get('isProcessing', False)}")
-            print()
+                print(f"  {icon} {d.get('name')} | CPU: {d.get('cpu', 0):.1f}% | "
+                    f"RAM: {d.get('ram', 0):.1f}% | GPU: {d.get('gpu', 0):.1f}%")
+
         elif msg_type == "device_status":
             body = pkt.get("body", {})
-            print(f"[MQTTHostClient] 📊 Status from {body.get('name', 'unknown')} — "
-                  f"CPU: {body.get('cpu', 0):.1f}% | RAM: {body.get('ram', 0):.1f}%")
+            name = body.get("name", "unknown")
+            # Store latest status per device, don't print every single one
+            self.device_status_cache[name] = {
+                "body": body,
+                "last_seen": time.time()
+            }
+
         else:
             print(f"[MQTTHostClient] 📨 Result: {json.dumps(pkt, indent=2)}")
 
