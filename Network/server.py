@@ -99,13 +99,14 @@ def on_message(client, userdata, msg):
         print("[NUC] Edge → Host forwarded")
         return
 
-    # 3) Edge status -> cache only
+    # 3) Edge status -> cache AND forward to host
     if msg.topic == EDGE_STATUS:
         pkt = safe_json(msg.payload)
         if isinstance(pkt, dict) and pkt.get("header", {}).get("message_type") == "device_status":
             name = pkt.get("body", {}).get("name") or pkt.get("header", {}).get("source_device") or "unknown"
             device_cache[name] = {"body": pkt.get("body", {}), "last_seen": time.time()}
-            print(f"[NUC] Cached status for {name}")
+            print(f"[NUC] Cached + forwarding status for {name}")
+            client.publish(SERVER_TO_HOST, msg.payload)  # <-- add this one line
         return
 
 
