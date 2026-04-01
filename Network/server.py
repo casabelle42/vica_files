@@ -65,21 +65,27 @@ def make_discovery_response(server_name: str = "NUC"):
 
 def on_connect(client, userdata, flags, rc):
     print("[NUC] Connected to broker")
-    client.subscribe([
+    result = client.subscribe([
         (HOST_TO_SERVER, 0),
         (EDGE_TO_SERVER, 0),
         (EDGE_STATUS, 0),   
     ])
-
+    print(f"[NUC] Subscribe result: {result}")
 
 def on_message(client, userdata, msg):
     # 1) Host -> NUC
+    print(f"[NUC] *** RAW MESSAGE *** topic={msg.topic} payload={msg.payload[:200]}")  # add this line 1
+    
     if msg.topic == HOST_TO_SERVER:
         pkt = safe_json(msg.payload)
+        print(f"[NUC] Parsed packet: {pkt}")  # add this
+        print(f"[NUC] Message type: {pkt.get('header', {}).get('message_type') if pkt else 'PARSE FAILED'}")  # add this
 
         if isinstance(pkt, dict) and pkt.get("header", {}).get("message_type") == "discovery":
             resp = make_discovery_response(server_name="NUC")
-            client.publish(SERVER_TO_HOST, json.dumps(resp).encode("utf-8"))
+            print(f"[NUC] Publishing discovery_response to {SERVER_TO_HOST}: {json.dumps(resp)[:200]}")  # add this
+            result = client.publish(SERVER_TO_HOST, json.dumps(resp).encode("utf-8"))
+            print(f"[NUC] Publish result: rc={result.rc}")  # add this
             print("[NUC] Host discovery → sent discovery_response")
             return
 
