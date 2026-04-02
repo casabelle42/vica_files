@@ -126,6 +126,111 @@ def main():
         request_timeout_sec=10.0,
     )
 
+    # ---- Live device updates from device_status (no discovery required) ----
+    devices_by_name: Dict[str, Dict[str, Any]] = {}
+    devices_lock = threading.Lock()
+
+    def _status_to_gui_device(body: Dict[str, Any]) -> Dict[str, Any]:
+        name = body.get("name") or "Unknown"
+        strength = body.get("network_strength")
+        if isinstance(strength, (int, float)):
+            if strength >= -60:
+                connection = "Strong"
+            elif strength >= -75:
+                connection = "Medium"
+            else:
+                connection = "Weak"
+        else:
+            connection = "Unknown"
+
+        is_proc = body.get("isProcessing")
+        meta_bits = []
+        if isinstance(body.get("cpu"), (int, float)):
+            meta_bits.append(f"CPU {body['cpu']:.1f}%")
+        if isinstance(body.get("ram"), (int, float)):
+            meta_bits.append(f"RAM {body['ram']:.1f}%")
+        if isinstance(body.get("gpu"), (int, float)):
+            meta_bits.append(f"GPU {body['gpu']:.1f}%")
+        if is_proc is True:
+            meta_bits.append("Processing")
+        metadata = " • ".join(meta_bits) if meta_bits else "N/A"
+
+        return {
+            "name": name,
+            "location": "IP: unknown",
+            "status": "Online",
+            "connection": connection,
+            "metadata": metadata,
+        }
+
+    def _emit_full_device_list():
+        with devices_lock:
+            gui_devices = list(devices_by_name.values())
+        ui.update_devices_signal.emit(gui_devices)
+
+    def _on_packet(pkt: Dict[str, Any]) -> None:
+        try:
+            header = (pkt or {}).get("header", {}) if isinstance(pkt, dict) else {}
+            msg_type = header.get("message_type")
+
+            if msg_type == "discovery_response":
+                raw = (pkt.get("body", {}) or {}).get("devices", [])
+                if isinstance(raw, list):
+                    with devices_lock:
+                        for d in raw:
+                            if not isinstance(d, dict):
+                                continue
+                            name = d.get("name") or "Unknown"
+                            status = "Online" if (d.get("status") == "online") else "Offline"
+                            strength = d.get("network_strength")
+                            if isinstance(strength, (int, float)):
+                                if strength >= -60:
+                                    connection = "Strong"
+                                elif strength >= -75:
+                                    connection = "Medium"
+                                else:
+                                    connection = "Weak"
+                            else:
+                                connection = "Unknown"
+
+                            meta_bits = []
+                            if isinstance(d.get("cpu"), (int, float)):
+                                meta_bits.append(f"CPU {d['cpu']:.1f}%")
+                            if isinstance(d.get("ram"), (int, float)):
+                                meta_bits.append(f"RAM {d['ram']:.1f}%")
+                            if isinstance(d.get("gpu"), (int, float)):
+                                meta_bits.append(f"GPU {d['gpu']:.1f}%")
+                            if d.get("isProcessing") is True:
+                                meta_bits.append("Processing")
+                            metadata = " • ".join(meta_bits) if meta_bits else "N/A"
+
+                            devices_by_name[name] = {
+                                "name": name,
+                                "location": "IP: unknown",
+                                "status": status,
+                                "connection": connection,
+                                "metadata": metadata,
+                            }
+                    _emit_full_device_list()
+                return
+
+            if msg_type == "device_status":
+                body = pkt.get("body", {}) if isinstance(pkt, dict) else {}
+                if isinstance(body, dict):
+                    gui_dev = _status_to_gui_device(body)
+                    with devices_lock:
+                        devices_by_name[gui_dev["name"]] = gui_dev
+                    _emit_full_device_list()
+                return
+        except Exception as e:
+            print(f"[HOST_MAIN] Packet handler error: {e!r}")
+
+    # Register packet callback (supported by our compatibility shim)
+    try:
+        sender.set_on_packet(_on_packet)
+    except Exception as e:
+        print(f"[HOST_MAIN] Warning: could not register packet callback: {e!r}")
+
     # ---- GUI Handler (patched) wiring ----
     handler = GUIHandler(
         available_devices_window=devices_window,
@@ -149,30 +254,17 @@ def main():
 
                 raw_devices = _safe_extract_devices(resp)
             
-
                 gui_devices = []
                 for d in raw_devices:
                     gui_devices.append({
-                        "name": d.get("device_name") or d.get("device_id") or "Unknown",
+                        "name": d.get("name") or d.get("device_name") or d.get("device_id") or "Unknown",
                         "location": f"IP: {d.get('ip', '')}".strip() or "IP: unknown",
-                        "status": "Online" if (d.get("status","").lower() == "online") else "Offline",
+                        "status": "Online" if (str(d.get("status","")).lower() == "online") else "Offline",
                         "connection": "Strong",
                         "metadata": "v1 • Active",
                     })
 
                 print(f"[HOST_MAIN] Updating GUI with {len(gui_devices)} device(s)")
-                # Update GUI on the Qt thread
-                def _apply_update():
-                    try:
-                        print("[HOST_MAIN] In QTimer callback. About to call update_devices()")
-                        devices_window.update_devices(gui_devices)
-                        devices_window.repaint()
-                        devices_window.update()
-                        print("[HOST_MAIN] update_devices() finished")
-
-                    except Exception as e:
-                        print(f"[HOST_MAIN] Exception in QTimer callback: {e!r}")
-
                 ui.update_devices_signal.emit(gui_devices)
 
             except Exception as e:
@@ -209,7 +301,7 @@ def main():
     # Tell the handler which functions to call for real user clicks
     handler.set_network_callbacks(on_discover=on_discover_clicked, on_query=on_query_sent)
 
-    print("[HOST_MAIN] ✅ GUI is running. Use Discover to test MQTT path.")
+    print("[HOST_MAIN] GUI is running. Use Discover to test MQTT path.")
     sys.exit(app.exec())
 
 
