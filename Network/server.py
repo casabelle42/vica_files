@@ -9,6 +9,7 @@ NUC MQTT Relay + Discovery (minimal)
 """
 
 import json
+import os
 import time
 import paho.mqtt.client as mqtt
 
@@ -23,6 +24,7 @@ SERVER_TO_HOST = "host/results"
 
 EDGE_STATUS = "edge/status"   
 
+VERBOSE = os.environ.get("VICA_NUC_VERBOSE", "0").strip() not in ("0", "", "false", "False", "no", "No")
 
 device_cache = {}  
 
@@ -74,29 +76,35 @@ def on_connect(client, userdata, flags, rc):
 
 def on_message(client, userdata, msg):
     # 1) Host -> NUC
-    print(f"[NUC] *** RAW MESSAGE *** topic={msg.topic} payload={msg.payload[:200]}")  # add this line 1
+    if VERBOSE:
+        print(f"[NUC] *** RAW MESSAGE *** topic={msg.topic} payload={msg.payload[:200]}")
     
     if msg.topic == HOST_TO_SERVER:
         pkt = safe_json(msg.payload)
-        print(f"[NUC] Parsed packet: {pkt}")  # add this
-        print(f"[NUC] Message type: {pkt.get('header', {}).get('message_type') if pkt else 'PARSE FAILED'}")  # add this
+        if VERBOSE:
+            print(f"[NUC] Parsed packet: {pkt}")
+            print(f"[NUC] Message type: {pkt.get('header', {}).get('message_type') if pkt else 'PARSE FAILED'}")
 
         if isinstance(pkt, dict) and pkt.get("header", {}).get("message_type") == "discovery":
             resp = make_discovery_response(server_name="NUC")
-            print(f"[NUC] Publishing discovery_response to {SERVER_TO_HOST}: {json.dumps(resp)[:200]}")  # add this
+            if VERBOSE:
+                print(f"[NUC] Publishing discovery_response to {SERVER_TO_HOST}: {json.dumps(resp)[:200]}")
             result = client.publish(SERVER_TO_HOST, json.dumps(resp).encode("utf-8"))
-            print(f"[NUC] Publish result: rc={result.rc}")  # add this
+            if VERBOSE:
+                print(f"[NUC] Publish result: rc={result.rc}")
             print("[NUC] Host discovery → sent discovery_response")
             return
 
         client.publish(SERVER_TO_EDGE, msg.payload)
-        print("[NUC] Host → Edge forwarded")
+        if VERBOSE:
+            print("[NUC] Host → Edge forwarded")
         return
 
     # 2) Edge results 
     if msg.topic == EDGE_TO_SERVER:
         client.publish(SERVER_TO_HOST, msg.payload)
-        print("[NUC] Edge → Host forwarded")
+        if VERBOSE:
+            print("[NUC] Edge → Host forwarded")
         return
 
     # 3) Edge status -> cache AND forward to host
@@ -105,7 +113,8 @@ def on_message(client, userdata, msg):
         if isinstance(pkt, dict) and pkt.get("header", {}).get("message_type") == "device_status":
             name = pkt.get("body", {}).get("name") or pkt.get("header", {}).get("source_device") or "unknown"
             device_cache[name] = {"body": pkt.get("body", {}), "last_seen": time.time()}
-            print(f"[NUC] Cached + forwarding status for {name}")
+            if VERBOSE:
+                print(f"[NUC] Cached + forwarding status for {name}")
             client.publish(SERVER_TO_HOST, msg.payload)  # <-- add this one line
         return
 

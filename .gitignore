@@ -1,0 +1,14 @@
+__pycache__/
+*.py[cod]
+*$py.class
+
+# pytest
+.pytest_cache/
+
+# virtualenv
+.venv/
+venv/
+
+# OS/editor
+.DS_Store
+Thumbs.db

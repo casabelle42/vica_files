@@ -143,6 +143,27 @@ class MQTTHostClient:
         self.outgoing_queue.put(("host/control", pkt))
         print("[MQTTHostClient] Queued discovery request")
 
+    def send_query_request(self, query: str, query_id: str | None = None):
+        query_id = str(query_id or uuid.uuid4())
+        pkt = {
+            "header": self._make_header("query_request"),
+            "body": {
+                "query_id": query_id,
+                "query": str(query or ""),
+            },
+        }
+        self.outgoing_queue.put(("host/control", pkt))
+        print(f"[MQTTHostClient] Queued query_request id={query_id}")
+        return query_id
+
+    def send_cancel_query_request(self, query_id: str):
+        pkt = {
+            "header": self._make_header("cancel_query_request"),
+            "body": {"query_id": str(query_id)},
+        }
+        self.outgoing_queue.put(("host/control", pkt))
+        print(f"[MQTTHostClient] Queued cancel_query_request id={query_id}")
+
     def send_command(self, command: str, params: dict = None):
         pkt = {
             "header": self._make_header("command"),
@@ -240,7 +261,7 @@ class HostCommandSender:
 
         if command == "query":
             query_text = (cmd or {}).get("query", "")
-            self._client.send_command("query", params={"query": query_text})
+            self._client.send_query_request(query_text)
             # Edge/NUC query response message_type may vary; default to query_response.
             resp = self._client.wait_for_message_type("query_response", timeout=timeout)
             return resp or {}
