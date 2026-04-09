@@ -9,21 +9,20 @@ import uuid
 from datetime import datetime
 import platform
 from model_init import ModelService, CFG
-import requests
 
 class EdgeHandler:
     """
-    Manages model container lifecycle and inference requests.
-    Sends periodic device status updates in JSON to a configured URL.
+    Proxy between the networking layer (client.py) and the inference layer (model_init.py).
+    Creates structured packets and passes them to client.py via callback.
+    Does not perform any network I/O directly.
     """
 
-    def __init__(self, on_update_callback=None, status_url=None):
+    def __init__(self, on_update_callback=None):
         """
         Initialize the EdgeHandler, start the model container, and prepare for inference.
         """
         self.logger = self._init_logger()
         self.on_update_callback = on_update_callback
-        self.status_url = status_url  # where to POST device status
         self.model_service = None
         self.model_thread = None
         self._stop_event = threading.Event()
@@ -261,18 +260,10 @@ class EdgeHandler:
                     }
                     container_status_packet = self._create_packet("container_status", container_status_body)
 
-                    # Notify local callback (send both statuses)
+                    # Pass both status packets to client.py via callback
                     if self.on_update_callback:
-                        self.on_update_callback("status", device_status_packet)
-                        self.on_update_callback("status", container_status_packet)
-
-                    # Send to network if URL is provided
-                    if self.status_url:
-                        try:
-                            requests.post(self.status_url, json=device_status_packet, timeout=5)
-                            requests.post(self.status_url, json=container_status_packet, timeout=5)
-                        except Exception as e:
-                            self.logger.warning(f"Failed to send status: {e}")
+                        self.on_update_callback("device_status", device_status_packet)
+                        self.on_update_callback("container_status", container_status_packet)
 
                 except Exception as e:
                     self.logger.warning(f"Status thread error: {e}")
@@ -339,7 +330,9 @@ class EdgeHandler:
             }
             cancel_status_packet = self._create_packet("cancel_query_status", cancel_status_body)
             self.logger.info("Container shutdown complete.")
-            return json.dumps(cancel_status_packet)
+            if self.on_update_callback:
+                self.on_update_callback("cancel_query_status", cancel_status_packet)
+            return
 
         # Handle query_request
         if message_type == "query_request":
@@ -382,6 +375,9 @@ class EdgeHandler:
                 # Create query_response packet
                 query_response_body = {
                     "query_id": query_id,
+                    # Prefer explicit answer text for host UI display.
+                    # Host will fall back to frame.detections if this is absent.
+                    "answer": results_text,
                     "metadata": {
                         "image_width": image_width,
                         "image_height": image_height,
@@ -404,10 +400,10 @@ class EdgeHandler:
                 }
                 query_response_packet = self._create_packet("query_response", query_response_body)
                 
-                result_json = json.dumps(query_response_packet)
-                self.logger.info(f"Packed inference results into query_response packet ({len(result_json)} chars)")
-                
-                return result_json
+                self.logger.info("Packed inference results into query_response packet")
+                if self.on_update_callback:
+                    self.on_update_callback("query_response", query_response_packet)
+                return
                 
             except Exception as e:
                 self.logger.error(f"Error processing query: {e}")
@@ -430,7 +426,9 @@ class EdgeHandler:
                     }
                 }
                 error_packet = self._create_packet("query_response", error_body)
-                return json.dumps(error_packet)
+                if self.on_update_callback:
+                    self.on_update_callback("query_response", error_packet)
+                return
         
         # Unknown message type
         self.logger.warning(f"Unknown message_type: {message_type}")

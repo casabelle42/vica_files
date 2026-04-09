@@ -31,16 +31,14 @@ class MQTTEdgeClient:
     # ------------------------
     def _on_handler_update(self, update_type, data):
         """
-        Called by EdgeHandler whenever there's an update.
-        Simply queue updates for publishing via MQTT.
+        Called by EdgeHandler whenever there's an outgoing packet.
+        Routes to the correct MQTT topic and queues for publishing.
         """
-        # Prepare a payload for MQTT
-        payload = {
-            "type": update_type,
-            "data": data
-        }
-        # Put it in the outgoing queue
-        self.outgoing_queue.put(payload)
+        if update_type in ("device_status", "container_status"):
+            topic = "edge/status"
+        else:
+            topic = "edge/results"
+        self.outgoing_queue.put((topic, data))
 
     # ------------------------
     # MQTT callbacks
@@ -55,26 +53,13 @@ class MQTTEdgeClient:
 
     def _on_mqtt_message(self, client, userdata, msg):
         """
-        Receive MQTT message and forward to EdgeHandler
+        Receive MQTT message and forward to EdgeHandler.
+        Handler will push any response packets back via the on_update_callback.
         """
         try:
             payload_str = msg.payload.decode()
             print(f"[MQTTEdgeClient] Received MQTT message on {msg.topic}: {payload_str}")
-            try:
-                payload = json.loads(payload_str)
-            except json.JSONDecodeError:
-                payload = payload_str  # fallback: send raw string
-
-            # Forward to handler and capture response
-            response_json = self.edge_handler.process_query(payload_str if isinstance(payload_str, str) else json.dumps(payload))
-
-            # If handler returned a query_response, queue it for publishing
-            if response_json:
-                try:
-                    response_dict = json.loads(response_json)
-                    self._on_handler_update("query_response", response_dict)
-                except json.JSONDecodeError as e:
-                    print(f"[MQTTEdgeClient] Invalid JSON from handler: {e}")
+            self.edge_handler.process_query(payload_str)
 
         except Exception as e:
             print(f"[MQTTEdgeClient] Error handling incoming MQTT message: {e}")
@@ -84,14 +69,14 @@ class MQTTEdgeClient:
     # ------------------------
     def _publish_outgoing(self):
         """
-        Publish messages queued by the handler to MQTT topic 'edge/results'
+        Publish packets queued by the handler to their designated MQTT topics.
         """
         while not self.outgoing_queue.empty():
-            payload = self.outgoing_queue.get()
+            topic, packet = self.outgoing_queue.get()
             try:
-                payload_str = json.dumps(payload, separators=(",", ":"), ensure_ascii=False)
-                self.mqtt_client.publish("edge/results", payload_str)
-                print(f"[MQTTEdgeClient] Published: {payload_str[:200]}...")
+                payload_str = json.dumps(packet, separators=(",", ":"), ensure_ascii=False)
+                self.mqtt_client.publish(topic, payload_str)
+                print(f"[MQTTEdgeClient] Published to {topic}: {payload_str[:200]}...")
             except Exception as e:
                 print(f"[MQTTEdgeClient] Error publishing message: {e}")
 
