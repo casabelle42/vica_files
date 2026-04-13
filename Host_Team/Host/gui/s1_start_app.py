@@ -17,6 +17,7 @@ import sys
 import json
 import socket
 import threading
+import base64
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 from PyQt6.QtWidgets import QApplication
@@ -48,6 +49,9 @@ def _safe_extract_devices(response: dict) -> list:
         return response["available_devices"]
 
     body = response.get("body")
+    # Current discovery_response schema: { "body": { "devices": [ ... ] } }
+    if isinstance(body, dict) and isinstance(body.get("devices"), list):
+        return body["devices"]
     if isinstance(body, dict) and isinstance(body.get("available_devices"), list):
         return body["available_devices"]
 
@@ -84,11 +88,100 @@ def _to_gui_devices(raw_devices: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 
 class UiDispatcher(QObject):
     update_devices_signal = pyqtSignal(list)
+    process_query_packet_signal = pyqtSignal(dict, str)
 
     def __init__(self, window):
         super().__init__()
         self._window = window
         self.update_devices_signal.connect(self._window.update_devices)
+
+        # Query window is created lazily; handler will provide it when available.
+        self._get_query_window = None  # Callable[[], Any] | None
+        self.process_query_packet_signal.connect(self._process_query_packet)
+
+    def set_query_window_getter(self, getter):
+        self._get_query_window = getter
+
+    def _process_query_packet(self, pkt: Dict[str, Any], query_text: str) -> None:
+        """
+        Runs on the Qt main thread (signal/slot), so it can safely update widgets.
+        """
+        qw = self._get_query_window() if callable(self._get_query_window) else None
+        if not qw:
+            print("[HOST_MAIN] query_response received but query window is not open")
+            return
+
+        try:
+            body = (pkt or {}).get("body", {}) if isinstance(pkt, dict) else {}
+            meta = body.get("metadata", {}) if isinstance(body, dict) else {}
+            frame = body.get("frame", {}) if isinstance(body, dict) else {}
+
+            image_b64 = meta.get("image_base64") or ""
+            if not isinstance(image_b64, str) or not image_b64:
+                print("[HOST_MAIN] query_response has no image_base64")
+                return
+
+            # Validate base64 early so add_returned_image doesn't silently no-op.
+            try:
+                base64.b64decode(image_b64, validate=False)
+            except Exception:
+                pass
+
+            header = (pkt or {}).get("header", {}) if isinstance(pkt, dict) else {}
+            detections = frame.get("detections") if isinstance(frame, dict) else None
+            if not isinstance(detections, list):
+                detections = []
+
+            # Prefer a real text answer if the edge provides one.
+            answer_text = ""
+            if isinstance(body, dict):
+                for key in ("answer", "response", "results", "results_text"):
+                    v = body.get(key)
+                    if isinstance(v, str) and v.strip():
+                        answer_text = v.strip()
+                        break
+
+            # Fall back to detections summary (common in current schema).
+            det_labels = []
+            for d in detections[:3]:
+                if isinstance(d, dict):
+                    lbl = d.get("label")
+                    if isinstance(lbl, str) and lbl.strip():
+                        det_labels.append(lbl.strip())
+            det_summary = ", ".join(det_labels)
+            max_conf = 0.0
+            for d in detections:
+                if isinstance(d, dict) and isinstance(d.get("confidence"), (int, float)):
+                    max_conf = max(max_conf, float(d["confidence"]))
+
+            chunk_index = meta.get("chunk_index", 0)
+            total_chunks = meta.get("total_chunks", 1)
+            try:
+                chunk_index_i = int(chunk_index)
+            except Exception:
+                chunk_index_i = 0
+            try:
+                total_chunks_i = int(total_chunks)
+            except Exception:
+                total_chunks_i = 1
+
+            image_metadata = {
+                "image": f"Frame {chunk_index_i + 1}/{total_chunks_i}",
+                "edge_device": header.get("source_device", "Unknown"),
+                "query": query_text or "User query",
+                "response": answer_text or det_summary or "No response text",
+                "confidence_rate": f"{max_conf * 100:.1f}%",
+                "time_processed": str(header.get("timestamp") or datetime.now().isoformat())[:19],
+            }
+
+            # Add thumbnail/image
+            if hasattr(qw, "add_returned_image"):
+                qw.add_returned_image(image_b64, metadata=image_metadata)
+            # Update metadata panel to latest image
+            if hasattr(qw, "update_metadata"):
+                qw.update_metadata(image_metadata)
+        except Exception as e:
+            print(f"[HOST_MAIN] Failed to render query_response: {e!r}")
 
 def main():
     # ---- CONFIG ----
@@ -168,6 +261,14 @@ def main():
             gui_devices = list(devices_by_name.values())
         ui.update_devices_signal.emit(gui_devices)
 
+    # Track latest query text/id so query_response rendering can label + filter it.
+    # MUST be defined before we register the MQTT on_packet callback, because packets
+    # can arrive immediately after connect/subscribe.
+    current_query_text_lock = threading.Lock()
+    current_query_text = {"text": ""}
+    current_query_id_lock = threading.Lock()
+    current_query_id = {"id": None}
+
     def _on_packet(pkt: Dict[str, Any]) -> None:
         try:
             header = (pkt or {}).get("header", {}) if isinstance(pkt, dict) else {}
@@ -222,6 +323,21 @@ def main():
                         devices_by_name[gui_dev["name"]] = gui_dev
                     _emit_full_device_list()
                 return
+
+            if msg_type == "query_response":
+                # Filter out stale query_response packets from previous queries.
+                body = pkt.get("body", {}) if isinstance(pkt, dict) else {}
+                pkt_qid = body.get("query_id") if isinstance(body, dict) else None
+                with current_query_id_lock:
+                    active_qid = current_query_id.get("id")
+                if active_qid and pkt_qid and str(pkt_qid) != str(active_qid):
+                    return
+
+                with current_query_text_lock:
+                    qt = current_query_text.get("text", "")
+                # Update GUI on Qt thread (thread-safe)
+                ui.process_query_packet_signal.emit(pkt, qt)
+                return
         except Exception as e:
             print(f"[HOST_MAIN] Packet handler error: {e!r}")
 
@@ -237,6 +353,9 @@ def main():
         on_discover=None,  # set below
         on_query=None,     # set below
     )
+
+    # Let UI dispatcher find the active query window when packets arrive
+    ui.set_query_window_getter(handler._get_query_window)
 
     def on_discover_clicked():
         """
@@ -283,15 +402,29 @@ def main():
             print("[HOST_MAIN] Query text empty — ignoring.")
             return
 
+        with current_query_text_lock:
+            current_query_text["text"] = query_text
+
+        # Clear previous images when starting a new query (if query window exists)
+        try:
+            qw = handler._get_query_window()
+            if qw and hasattr(qw, "clear_returned_images"):
+                qw.clear_returned_images()
+        except Exception:
+            pass
+
+        # Send query_request async and remember query_id for filtering.
+        try:
+            qid = sender.send_query_request(query_text)
+            with current_query_id_lock:
+                current_query_id["id"] = qid
+        except Exception as e:
+            print(f"[HOST_MAIN] Failed to send query_request: {e!r}")
+            return
+
         def worker():
             try:
-                cmd = {"command": "query", "query": query_text}
-                print(f"[HOST_MAIN] Sending query: {cmd}")
-                resp = sender.send_command(cmd, reply_topic=QUERY_REPLY_TOPIC, timeout=30.0)
-                print(f"[HOST_MAIN] Query response: {json.dumps(resp, indent=2)[:4000]}")
-
-                # TODO: If response contains images/metadata, forward into GUIHandler.
-                # For now, you can extend this once edge publishes a proper query_response packet.
+                print("[HOST_MAIN] Query request sent (async); waiting for query_response packets...")
 
             except Exception as e:
                 print(f"[HOST_MAIN] Query failed: {e}")

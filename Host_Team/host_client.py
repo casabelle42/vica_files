@@ -270,6 +270,13 @@ class HostCommandSender:
         self._client.send_command(str(command or "command"), params=(cmd or {}))
         return {}
 
+    def send_query_request(self, query_text: str, query_id: str | None = None):
+        """
+        Send a query_request packet and return the query_id immediately.
+        Use this for async UI flows that render query_response packets via on_packet.
+        """
+        return self._client.send_query_request(query_text, query_id=query_id)
+
     def close(self):
         self._client.stop_background()
 

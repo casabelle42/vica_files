@@ -484,6 +484,20 @@ class GUIHandler(QObject):
                 self.available_devices_window._open_query_window = wrapped_open_query_window
                 setattr(self.available_devices_window, "_gui_handler_wrapped_open_query", True)
 
+                # IMPORTANT: Qt signal connections capture the bound method at connect-time.
+                # s3_availableDevices connects query_btn.clicked to the *original* method during init,
+                # so replacing the attribute isn't enough; we must reconnect the signal.
+                try:
+                    btn = getattr(self.available_devices_window, "query_btn", None)
+                    if btn is not None and hasattr(btn, "clicked"):
+                        try:
+                            btn.clicked.disconnect()
+                        except Exception:
+                            pass
+                        btn.clicked.connect(self.available_devices_window._open_query_window)
+                except Exception as e:
+                    logger.warning(f"Failed to rewire query button: {e}")
+
         # If a query window already exists, bind it now
         if self.query_window:
             self._bind_query_window_callbacks(self.query_window)
