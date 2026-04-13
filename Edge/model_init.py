@@ -1,18 +1,17 @@
 #!/usr/bin/env python3
 """
-Model_Init.py — Jetson container + model lifecycle + per-frame inference loop.
+Model_Init.py — Jetson container + model lifecycle + per-frame inference.
 
-Responsibilities (Tyuss):
+Responsibilities:
 - Start/verify Jetson Docker container for the VLM stack
-- Load model weights; emit INIT -> MODEL_READY state to server
-- Receive queries/commands from server, run per-frame inference
-- Stream JSON per frame: machine, CPU/RAM, question, results, image (b64)
+- Load model weights; emit INIT -> MODEL_READY state via callback
+- Accept inference requests, run per-frame inference, return results to handler
 - Support pause/resume without unloading model
 """
 
-import os, json, time, base64, socket, threading, queue, subprocess, platform, signal
+import os, time, base64, threading, queue, subprocess, platform
 from dataclasses import dataclass
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, Callable
 import psutil
 import cv2
 
@@ -20,9 +19,6 @@ import cv2
 
 @dataclass
 class Config:
-    # Networking to Raspberry Pi server
-    SERVER_HOST: str = os.getenv("SERVER_HOST", "192.168.1.100")
-    SERVER_PORT: int = int(os.getenv("SERVER_PORT", "5055"))
     # Camera
     CAMERA_INDEX: int = int(os.getenv("CAMERA_INDEX", "0"))
     FRAME_INTERVAL_SEC: float = float(os.getenv("FRAME_INTERVAL_SEC", "0.05"))  # ~20 FPS
@@ -30,63 +26,12 @@ class Config:
     CONTAINER_NAME: str = os.getenv("CONTAINER_NAME", "nano-vlm")
     DOCKER_IMAGE: str = os.getenv("DOCKER_IMAGE", "yourrepo/nano-vlm:jetson")
     AUTO_START_CONTAINER: bool = os.getenv("AUTO_START_CONTAINER", "1") == "1"
-    # Protocol
+    # Identity
     MACHINE_NAME: str = os.getenv("MACHINE_NAME", platform.node())
-    RECONNECT_DELAY_SEC: float = float(os.getenv("RECONNECT_DELAY_SEC", "2.0"))
-    # Control
-    LOG_EVERY_N_FRAMES: int = int(os.getenv("LOG_EVERY_N_FRAMES", "60"))
 
 CFG = Config()
 
-# ========= Simple TCP client (replace with websockets/ZeroMQ if you prefer) =========
-
-class PiClient:
-    def __init__(self, host: str, port: int):
-        self.host, self.port = host, port
-        self.sock: Optional[socket.socket] = None
-        self.lock = threading.Lock()
-
-    def connect(self):
-        while True:
-            try:
-                s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                s.connect((self.host, self.port))
-                with self.lock:
-                    self.sock = s
-                return
-            except Exception:
-                time.sleep(CFG.RECONNECT_DELAY_SEC)
-
-    def send_json(self, payload: Dict[str, Any]):
-        data = (json.dumps(payload) + "\n").encode("utf-8")
-        with self.lock:
-            if not self.sock:
-                raise RuntimeError("Socket not connected")
-            try:
-                self.sock.sendall(data)
-            except Exception:
-                # reconnect and retry once
-                self.connect()
-                self.sock.sendall(data)
-
-    def recv_line(self, timeout: float = 0.1) -> Optional[str]:
-        if not self.sock:
-            return None
-        self.sock.settimeout(timeout)
-        try:
-            buf = self.sock.recv(4096)
-            if not buf:
-                # server closed; force reconnect
-                self.connect()
-                return None
-            return buf.decode("utf-8", errors="ignore")
-        except socket.timeout:
-            return None
-        except Exception:
-            self.connect()
-            return None
-
-# ========= Container helpers (simple) =========
+# ========= Container helpers =========
 
 def ensure_container_running() -> None:
     """
@@ -210,134 +155,87 @@ def sys_metrics() -> Dict[str, Any]:
         "ram_total_mb": int(vm.total / (1024*1024)),
     }
 
-# ========= Main state machine =========
+# ========= Model service =========
 
 class ModelService:
-    def __init__(self):
-        self.client = PiClient(CFG.SERVER_HOST, CFG.SERVER_PORT)
+    """
+    Manages the VLM container and model lifecycle.
+    Accepts inference requests from handler.py and returns results via callback.
+    Has no network connections — all I/O is handled by client.py.
+    """
+
+    def __init__(self, on_status_update: Optional[Callable] = None):
+        self._on_status_update = on_status_update
         self.model = NanoVLM()
-        self.frames = queue.Queue(maxsize=5)
+        self.frames: queue.Queue = queue.Queue(maxsize=5)
         self.cam_worker = CameraWorker(CFG.CAMERA_INDEX, self.frames)
-        self.frame_counter = 0
-        self.running = True
 
-    def send_status(self, state: str, extra: Optional[Dict[str, Any]] = None):
-        payload = {
-            "type": "status",
-            "state": state,               # INIT, MODEL_READY, RUNNING, PAUSED
-            "machine": CFG.MACHINE_NAME,
-            "metrics": sys_metrics(),
-            "extra": extra or {},
-            "ts": time.time(),
-        }
-        self.client.send_json(payload)
+    # -------------------------
+    # Pause / resume
+    # -------------------------
 
-    def send_frame_result(self, question: str, result: Dict[str, Any], frame_b64: str):
-        payload = {
-            "type": "frame_result",
-            "machine": CFG.MACHINE_NAME,
-            "metrics": sys_metrics(),
-            "question": question,
-            "result": result,
-            "image_b64_jpg": frame_b64,
-            "ts": time.time(),
-        }
-        self.client.send_json(payload)
+    @property
+    def paused(self) -> bool:
+        return self.model.paused
 
-    def handle_server_commands(self, text: str):
+    @paused.setter
+    def paused(self, value: bool):
+        if value:
+            self.model.pause()
+        else:
+            self.model.resume()
+
+    # -------------------------
+    # Internal status emit
+    # -------------------------
+
+    def _emit_status(self, state: str, extra: Optional[Dict[str, Any]] = None):
+        if self._on_status_update:
+            self._on_status_update("status", {
+                "state": state,
+                "machine": CFG.MACHINE_NAME,
+                "metrics": sys_metrics(),
+                "extra": extra or {},
+                "ts": time.time(),
+            })
+
+    # -------------------------
+    # Lifecycle
+    # -------------------------
+
+    def start(self) -> bool:
         """
-        Expect newline-delimited JSON commands like:
-        {"cmd":"set_query","question":"find white car"}
-        {"cmd":"pause"} / {"cmd":"resume"} / {"cmd":"stop"}
+        Ensure the container is running, load the model, and start the camera.
+        Called by handler.py in a background thread. Returns True on success.
         """
-        for line in filter(None, text.splitlines()):
-            try:
-                msg = json.loads(line)
-            except Exception:
-                continue
-            cmd = msg.get("cmd")
-            if cmd == "set_query":
-                q = msg.get("question", "")
-                self.model.set_query(q)
-                if self.model.paused:
-                    self.model.resume()
-                self.send_status("RUNNING", {"question": q})
-            elif cmd == "pause":
-                self.model.pause()
-                self.send_status("PAUSED", {})
-            elif cmd == "resume":
-                self.model.resume()
-                self.send_status("RUNNING", {"question": self.model.current_query})
-            elif cmd == "stop":
-                # stop sending results but keep model loaded (per docs)
-                self.model.pause()
-                self.send_status("PAUSED", {"reason": "stop command"})
-            else:
-                # no-op / unknown
-                pass
-
-    def run(self):
-        # 1) Connect to server
-        self.client.connect()
-
-        # 2) Container lifecycle
         ensure_container_running()
-
-        # 3) Emit INIT, then load model
-        self.send_status("INIT", {})
+        self._emit_status("INIT")
         self.model.load()
-        self.send_status("MODEL_READY", {})
-
-        # 4) Start camera
+        self._emit_status("MODEL_READY")
         self.cam_worker.start()
-
-        # 5) Main loop: read frames, poll server for commands, run inference if running
-        try:
-            last_cmd_poll = 0
-            while self.running:
-                now = time.time()
-                if now - last_cmd_poll > 0.1:
-                    resp = self.client.recv_line(timeout=0.01)
-                    if resp:
-                        self.handle_server_commands(resp)
-                    last_cmd_poll = now
-
-                if self.model.paused or not self.model.loaded or not self.model.current_query:
-                    time.sleep(0.01)
-                    continue
-
-                try:
-                    frame = self.frames.get(timeout=0.2)
-                except queue.Empty:
-                    continue
-
-                result = self.model.infer(frame)
-                img_b64 = encode_jpeg_b64(frame)
-                self.send_frame_result(self.model.current_query, result, img_b64)
-
-                self.frame_counter += 1
-                if self.frame_counter % CFG.LOG_EVERY_N_FRAMES == 0:
-                    print(f"[loop] sent {self.frame_counter} frames")
-        except KeyboardInterrupt:
-            pass
-        finally:
-            self.shutdown()
+        return True
 
     def shutdown(self):
-        print("[shutdown] stopping camera + service")
+        """Stop the camera. Container and model weights stay loaded by design."""
         self.cam_worker.stop()
-        self.running = False
-        # keep container/model alive by design; just exit process
 
-def main():
-    svc = ModelService()
-    def _sigterm(_a,_b):
-        svc.shutdown()
-        os._exit(0)
-    signal.signal(signal.SIGTERM, _sigterm)
-    signal.signal(signal.SIGINT, _sigterm)
-    svc.run()
+    # -------------------------
+    # Inference
+    # -------------------------
 
-if __name__ == "__main__":
-    main()
-
+    def run_inference(self, query_text: str) -> Dict[str, Any]:
+        """
+        Run inference for query_text on the next available camera frame.
+        Returns {"image": base64_jpeg_str, "results": str}.
+        Returns {} if no frame is available within the timeout.
+        """
+        self.model.set_query(query_text)
+        try:
+            frame = self.frames.get(timeout=2.0)
+        except queue.Empty:
+            return {}
+        result = self.model.infer(frame)
+        return {
+            "image": encode_jpeg_b64(frame),
+            "results": result.get("summary", ""),
+        }
