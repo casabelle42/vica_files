@@ -1,6 +1,7 @@
 import json
 import queue
 import time
+import os
 import paho.mqtt.client as mqtt
 from handler import EdgeHandler  # Make sure your handler is in the same directory
 
@@ -102,6 +103,8 @@ class MQTTEdgeClient:
 # Run the client
 # ------------------------
 if __name__ == "__main__":
-    MQTT_BROKER_IP = "localhost"  # PLACEHOLDER FOR THE NUC'S IP ADDR, NEED TO INPUT PORT AS WELL
-    client = MQTTEdgeClient(mqtt_broker=MQTT_BROKER_IP)
+    # Default to the NUC broker; allow override via env var.
+    MQTT_BROKER_IP = os.environ.get("VICA_MQTT_BROKER", "10.148.0.95")
+    MQTT_BROKER_PORT = int(os.environ.get("VICA_MQTT_PORT", "1883"))
+    client = MQTTEdgeClient(mqtt_broker=MQTT_BROKER_IP, mqtt_port=MQTT_BROKER_PORT)
     client.start()
