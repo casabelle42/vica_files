@@ -112,6 +112,9 @@ class UiDispatcher(QObject):
             return
 
         try:
+            from PyQt6.QtGui import QPixmap
+            from PyQt6.QtCore import QByteArray, Qt
+
             body = (pkt or {}).get("body", {}) if isinstance(pkt, dict) else {}
             meta = body.get("metadata", {}) if isinstance(body, dict) else {}
             frame = body.get("frame", {}) if isinstance(body, dict) else {}
@@ -121,11 +124,15 @@ class UiDispatcher(QObject):
                 print("[HOST_MAIN] query_response has no image_base64")
                 return
 
-            # Validate base64 early so add_returned_image doesn't silently no-op.
+            # Decode base64 into a pixmap for the main preview.
+            pixmap = None
             try:
-                base64.b64decode(image_b64, validate=False)
+                image_bytes = base64.b64decode(image_b64, validate=False)
+                pm = QPixmap()
+                if pm.loadFromData(QByteArray(image_bytes)):
+                    pixmap = pm
             except Exception:
-                pass
+                pixmap = None
 
             header = (pkt or {}).get("header", {}) if isinstance(pkt, dict) else {}
             detections = frame.get("detections") if isinstance(frame, dict) else None
@@ -140,6 +147,13 @@ class UiDispatcher(QObject):
                     if isinstance(v, str) and v.strip():
                         answer_text = v.strip()
                         break
+            # Fall back to first detection full text if present.
+            if not answer_text and detections:
+                d0 = detections[0] if isinstance(detections[0], dict) else None
+                if isinstance(d0, dict):
+                    dets0 = d0.get("dets")
+                    if isinstance(dets0, list) and dets0 and isinstance(dets0[0], str) and dets0[0].strip():
+                        answer_text = dets0[0].strip()
 
             # Fall back to detections summary (common in current schema).
             det_labels = []
@@ -174,10 +188,25 @@ class UiDispatcher(QObject):
                 "time_processed": str(header.get("timestamp") or datetime.now().isoformat())[:19],
             }
 
-            # Add thumbnail/image
+            # Add thumbnail/image to returned list
             if hasattr(qw, "add_returned_image"):
                 qw.add_returned_image(image_b64, metadata=image_metadata)
-            # Update metadata panel to latest image
+
+            # Update main preview immediately (so it doesn't look "reused")
+            if pixmap is not None and hasattr(qw, "image_label"):
+                try:
+                    qw.image_label.setPixmap(
+                        pixmap.scaled(
+                            qw.image_label.width(),
+                            qw.image_label.height(),
+                            Qt.AspectRatioMode.KeepAspectRatio,
+                            Qt.TransformationMode.SmoothTransformation,
+                        )
+                    )
+                except Exception:
+                    pass
+
+            # Update metadata panel to latest packet
             if hasattr(qw, "update_metadata"):
                 qw.update_metadata(image_metadata)
         except Exception as e:
