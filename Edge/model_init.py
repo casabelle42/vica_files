@@ -122,6 +122,7 @@ class CameraWorker(threading.Thread):
         self.out_q = out_q
         self.stop_ev = threading.Event()
         self.cap = None
+        self._frame_id = 0
 
     def run(self):
         self.cap = cv2.VideoCapture(self.cam_index)
@@ -131,6 +132,8 @@ class CameraWorker(threading.Thread):
         while not self.stop_ev.is_set():
             ok, frame = self.cap.read()
             if ok:
+                self._frame_id += 1
+                frame_ts = time.time()
                 # Keep only the most recent frame to avoid stale frames being reused
                 # across multiple queries when the consumer is slower than the camera.
                 while not self.out_q.empty():
@@ -139,7 +142,8 @@ class CameraWorker(threading.Thread):
                     except Exception:
                         break
                 try:
-                    self.out_q.put_nowait(frame)
+                    # Store (frame_id, timestamp, frame_bgr)
+                    self.out_q.put_nowait((self._frame_id, frame_ts, frame))
                 except Exception:
                     pass
             time.sleep(CFG.FRAME_INTERVAL_SEC)
@@ -241,11 +245,13 @@ class ModelService:
         """
         self.model.set_query(query_text)
         try:
-            frame = self.frames.get(timeout=2.0)
+            frame_id, frame_ts, frame = self.frames.get(timeout=2.0)
         except queue.Empty:
             return {}
         result = self.model.infer(frame)
         return {
+            "frame_id": frame_id,
+            "frame_ts": frame_ts,
             "image": encode_jpeg_b64(frame),
             "results": result.get("summary", ""),
         }

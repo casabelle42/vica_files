@@ -362,7 +362,12 @@ class EdgeHandler:
                 # Extract image and results from model output
                 image_base64 = result_dict.get("image", "")
                 results_text = result_dict.get("results", "")
-                frame_timestamp = datetime.now().isoformat()
+                frame_id = result_dict.get("frame_id", 0)
+                frame_ts = result_dict.get("frame_ts")
+                if isinstance(frame_ts, (int, float)):
+                    frame_timestamp = datetime.fromtimestamp(frame_ts).isoformat()
+                else:
+                    frame_timestamp = datetime.now().isoformat()
                 
                 # Get image dimensions (if available) - placeholder for now
                 image_width = 0
@@ -384,7 +389,7 @@ class EdgeHandler:
                         "total_chunks": 1
                     },
                     "frame": {
-                        "frame_id": 0,
+                        "frame_id": int(frame_id) if isinstance(frame_id, (int, float, str)) and str(frame_id).isdigit() else 0,
                         "timestamp": frame_timestamp,
                         "detections": [
                             {
