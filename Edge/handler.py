@@ -375,9 +375,6 @@ class EdgeHandler:
                 # Create query_response packet
                 query_response_body = {
                     "query_id": query_id,
-                    # Prefer explicit answer text for host UI display.
-                    # Host will fall back to frame.detections if this is absent.
-                    "answer": results_text,
                     "metadata": {
                         "image_width": image_width,
                         "image_height": image_height,
@@ -400,7 +397,7 @@ class EdgeHandler:
                 }
                 query_response_packet = self._create_packet("query_response", query_response_body)
                 
-                self.logger.info("Packed inference results into query_response packet")
+                self.logger.info(f"Packed inference results into query_response packet")
                 if self.on_update_callback:
                     self.on_update_callback("query_response", query_response_packet)
                 return
@@ -483,4 +480,3 @@ if __name__ == "__main__":
         pass
     finally:
         handler.stop()
-
