@@ -60,7 +60,6 @@ class MQTTEdgeClient:
             payload_str = msg.payload.decode()
             print(f"[MQTTEdgeClient] Received MQTT message on {msg.topic}: {payload_str}")
             self.edge_handler.process_query(payload_str)
-
         except Exception as e:
             print(f"[MQTTEdgeClient] Error handling incoming MQTT message: {e}")
 
