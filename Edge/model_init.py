@@ -131,7 +131,17 @@ class CameraWorker(threading.Thread):
         while not self.stop_ev.is_set():
             ok, frame = self.cap.read()
             if ok:
-                self.out_q.put(frame)
+                # Keep only the most recent frame to avoid stale frames being reused
+                # across multiple queries when the consumer is slower than the camera.
+                while not self.out_q.empty():
+                    try:
+                        self.out_q.get_nowait()
+                    except Exception:
+                        break
+                try:
+                    self.out_q.put_nowait(frame)
+                except Exception:
+                    pass
             time.sleep(CFG.FRAME_INTERVAL_SEC)
 
     def stop(self):
