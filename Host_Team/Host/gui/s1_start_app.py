@@ -126,8 +126,12 @@ class UiDispatcher(QObject):
 
             # Decode base64 into a pixmap for the main preview.
             pixmap = None
+            image_fingerprint = ""
             try:
                 image_bytes = base64.b64decode(image_b64, validate=False)
+                # Fingerprint lets us confirm whether edge is reusing images across queries.
+                import hashlib
+                image_fingerprint = hashlib.sha1(image_bytes).hexdigest()[:10]
                 pm = QPixmap()
                 if pm.loadFromData(QByteArray(image_bytes)):
                     pixmap = pm
@@ -180,7 +184,7 @@ class UiDispatcher(QObject):
                 total_chunks_i = 1
 
             image_metadata = {
-                "image": f"Frame {chunk_index_i + 1}/{total_chunks_i}",
+                "image": f"Frame {chunk_index_i + 1}/{total_chunks_i}" + (f" • {image_fingerprint}" if image_fingerprint else ""),
                 "edge_device": header.get("source_device", "Unknown"),
                 "query": query_text or "User query",
                 "response": answer_text or det_summary or "No response text",

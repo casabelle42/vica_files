@@ -10,6 +10,7 @@ from PyQt6.QtWidgets import (
     QLineEdit,
     QMainWindow,
     QPushButton,
+    QTextEdit,
     QWidget,
     QVBoxLayout,
 )
@@ -672,12 +673,40 @@ class MainWindow(QMainWindow):
         self.metadata_labels = {}
         for label_text in metadata_labels:
             field_name = label_text.replace(":", "").replace(" ", "_").lower()
-            label = QLabel(label_text)
-            label.setStyleSheet("color: #000000; background-color: transparent;")
-            label.setFont(metadata_text_font)
-            label.setObjectName(f"metadata_{field_name}")
-            self.metadata_labels[field_name] = label
-            metadata_layout.addWidget(label, alignment=Qt.AlignmentFlag.AlignLeft)
+            if field_name == "response":
+                # Dedicated scrollable response area
+                response_title = QLabel("Response:")
+                response_title.setStyleSheet("color: #000000; background-color: transparent;")
+                response_title.setFont(metadata_text_font)
+                metadata_layout.addWidget(response_title, alignment=Qt.AlignmentFlag.AlignLeft)
+
+                response_box = QTextEdit()
+                response_box.setReadOnly(True)
+                response_box.setLineWrapMode(QTextEdit.LineWrapMode.WidgetWidth)
+                response_box.setStyleSheet(
+                    "color: #000000;"
+                    "background-color: rgba(255, 255, 255, 0.55);"
+                    "border-radius: 8px;"
+                    "padding: 8px;"
+                )
+                response_box.setMinimumHeight(140)
+                response_box.setObjectName("metadata_response")
+                self.metadata_labels[field_name] = response_box
+                metadata_layout.addWidget(response_box)
+            else:
+                label = QLabel(label_text)
+                label.setStyleSheet("color: #000000; background-color: transparent;")
+                label.setFont(metadata_text_font)
+                label.setWordWrap(True)
+                label.setTextInteractionFlags(
+                    Qt.TextInteractionFlag.TextSelectableByMouse
+                    | Qt.TextInteractionFlag.TextSelectableByKeyboard
+                )
+                if field_name == "query":
+                    label.setMinimumHeight(48)
+                label.setObjectName(f"metadata_{field_name}")
+                self.metadata_labels[field_name] = label
+                metadata_layout.addWidget(label, alignment=Qt.AlignmentFlag.AlignLeft)
         
         metadata_layout.addStretch(1)
         
@@ -764,13 +793,17 @@ class MainWindow(QMainWindow):
         for field_name, value in metadata.items():
             if field_name in self.metadata_labels:
                 # Get the label text prefix (e.g., "Image:" from "Image: value")
-                label = self.metadata_labels[field_name]
-                current_text = label.text()
+                widget = self.metadata_labels[field_name]
+                if isinstance(widget, QTextEdit):
+                    widget.setPlainText("" if value is None else str(value))
+                    continue
+
+                current_text = widget.text()
                 if ":" in current_text:
                     prefix = current_text.split(":")[0]
-                    label.setText(f"{prefix}: {value}")
+                    widget.setText(f"{prefix}: {value}")
                 else:
-                    label.setText(f"{field_name}: {value}")
+                    widget.setText(f"{field_name}: {value}")
     
     def add_returned_image(self, image_path_or_data: str, metadata: dict = None):
         """Add an image to the returned images section."""
