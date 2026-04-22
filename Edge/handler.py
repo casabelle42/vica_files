@@ -351,60 +351,89 @@ class EdgeHandler:
             self.model_service.paused = False  # resume inference
 
             try:
-                # Run VLM inference - returns dict with image and results
-                result_dict = self.model_service.run_inference(query_text)
-                
-                # Check if we got a valid result (dict with keys)
-                if not isinstance(result_dict, dict) or not result_dict:
+                # Run VLM inference - returns list of dicts (one per frame)
+                result_list = self.model_service.run_inference_many(
+                    query_text,
+                    num_frames=getattr(CFG, "RETURN_FRAMES", 1),
+                    timeout_sec=2.0,
+                )
+
+                if not isinstance(result_list, list) or len(result_list) == 0:
                     self.logger.warning("No valid results from inference.")
-                    return None
-                
-                # Extract image and results from model output
-                image_base64 = result_dict.get("image", "")
-                results_text = result_dict.get("results", "")
-                frame_id = result_dict.get("frame_id", 0)
-                frame_ts = result_dict.get("frame_ts")
-                if isinstance(frame_ts, (int, float)):
-                    frame_timestamp = datetime.fromtimestamp(frame_ts).isoformat()
-                else:
-                    frame_timestamp = datetime.now().isoformat()
-                
-                # Get image dimensions (if available) - placeholder for now
-                image_width = 0
-                image_height = 0
-                if image_base64:
-                    # Could decode base64 to get dimensions, but for now use placeholder
-                    image_width = 640  # Placeholder
-                    image_height = 480  # Placeholder
-                
-                # Create query_response packet
-                query_response_body = {
-                    "query_id": query_id,
-                    "metadata": {
-                        "image_width": image_width,
-                        "image_height": image_height,
-                        "format": "jpeg",
-                        "image_base64": image_base64,
-                        "chunk_index": 0,
-                        "total_chunks": 1
-                    },
-                    "frame": {
-                        "frame_id": int(frame_id) if isinstance(frame_id, (int, float, str)) and str(frame_id).isdigit() else 0,
-                        "timestamp": frame_timestamp,
-                        "detections": [
-                            {
-                                "label": results_text[:100] if results_text else "no_results",  # VLM results as label
-                                "confidence": 1.0,
-                                "dets": [results_text] if results_text else []
-                            }
-                        ]
+                    # Emit an explicit error response so the Host doesn't wait forever.
+                    error_body = {
+                        "query_id": query_id,
+                        "metadata": {},
+                        "answer": "Edge inference returned no frame/results. Camera may be unavailable on this device.",
+                        "frame": {
+                            "frame_id": 0,
+                            "timestamp": datetime.now().isoformat(),
+                            "detections": [
+                                {
+                                    "label": "no_results",
+                                    "confidence": 0.0,
+                                    "dets": ["No valid results from inference (likely no camera frames)."]
+                                }
+                            ]
+                        }
                     }
-                }
-                query_response_packet = self._create_packet("query_response", query_response_body)
-                
-                self.logger.info(f"Packed inference results into query_response packet")
-                if self.on_update_callback:
-                    self.on_update_callback("query_response", query_response_packet)
+                    error_packet = self._create_packet("query_response", error_body)
+                    if self.on_update_callback:
+                        self.on_update_callback("query_response", error_packet)
+                    return
+
+                total_chunks = len(result_list)
+                for chunk_index, result_dict in enumerate(result_list):
+                    # Extract image and results from model output
+                    image_base64 = result_dict.get("image", "")
+                    results_text = result_dict.get("results", "")
+                    frame_id = result_dict.get("frame_id", 0)
+                    frame_ts = result_dict.get("frame_ts")
+                    if isinstance(frame_ts, (int, float)):
+                        frame_timestamp = datetime.fromtimestamp(frame_ts).isoformat()
+                    else:
+                        frame_timestamp = datetime.now().isoformat()
+
+                    # Get image dimensions (if available) - placeholder for now
+                    image_width = 0
+                    image_height = 0
+                    if image_base64:
+                        # Could decode base64 to get dimensions, but for now use placeholder
+                        image_width = 640  # Placeholder
+                        image_height = 480  # Placeholder
+
+                    # Create query_response packet (chunked)
+                    query_response_body = {
+                        "query_id": query_id,
+                        "answer": results_text,
+                        "metadata": {
+                            "image_width": image_width,
+                            "image_height": image_height,
+                            "format": "jpeg",
+                            "image_base64": image_base64,
+                            "chunk_index": int(chunk_index),
+                            "total_chunks": int(total_chunks),
+                        },
+                        "frame": {
+                            "frame_id": int(frame_id)
+                            if isinstance(frame_id, (int, float, str)) and str(frame_id).isdigit()
+                            else 0,
+                            "timestamp": frame_timestamp,
+                            "detections": [
+                                {
+                                    "label": results_text[:100] if results_text else "no_results",
+                                    "confidence": 1.0 if results_text else 0.0,
+                                    "dets": [results_text] if results_text else [],
+                                }
+                            ],
+                        },
+                    }
+                    query_response_packet = self._create_packet("query_response", query_response_body)
+
+                    if self.on_update_callback:
+                        self.on_update_callback("query_response", query_response_packet)
+
+                self.logger.info(f"Packed inference results into {total_chunks} query_response chunk(s)")
                 return
                 
             except Exception as e:

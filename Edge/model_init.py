@@ -21,7 +21,14 @@ import cv2
 class Config:
     # Camera
     CAMERA_INDEX: int = int(os.getenv("CAMERA_INDEX", "0"))
+    # Optional: GStreamer pipeline string (useful for Jetson CSI cameras that don't expose /dev/video*)
+    # Example:
+    # export CAMERA_GSTREAMER="nvarguscamerasrc sensor-id=0 ! video/x-raw(memory:NVMM), width=1280, height=720, framerate=30/1 ! nvvidconv ! video/x-raw, format=BGRx ! videoconvert ! video/x-raw, format=BGR ! appsink drop=true"
+    CAMERA_GSTREAMER: str = os.getenv("CAMERA_GSTREAMER", "").strip()
     FRAME_INTERVAL_SEC: float = float(os.getenv("FRAME_INTERVAL_SEC", "0.05"))  # ~20 FPS
+    # Results
+    # How many frames to return per query (as chunked query_response packets).
+    RETURN_FRAMES: int = int(os.getenv("RETURN_FRAMES", "3"))
     # Container/Model
     CONTAINER_NAME: str = os.getenv("CONTAINER_NAME", "nano-vlm")
     DOCKER_IMAGE: str = os.getenv("DOCKER_IMAGE", "yourrepo/nano-vlm:jetson")
@@ -125,9 +132,14 @@ class CameraWorker(threading.Thread):
         self._frame_id = 0
 
     def run(self):
-        self.cap = cv2.VideoCapture(self.cam_index)
+        if CFG.CAMERA_GSTREAMER:
+            # Prefer explicit pipeline when provided (common for Jetson CSI cameras)
+            self.cap = cv2.VideoCapture(CFG.CAMERA_GSTREAMER, cv2.CAP_GSTREAMER)
+        else:
+            self.cap = cv2.VideoCapture(self.cam_index)
         if not self.cap.isOpened():
-            print(f"[camera] failed to open index {self.cam_index}")
+            src = "gstreamer pipeline" if CFG.CAMERA_GSTREAMER else f"index {self.cam_index}"
+            print(f"[camera] failed to open camera ({src}).")
             return
         while not self.stop_ev.is_set():
             ok, frame = self.cap.read()
@@ -243,15 +255,41 @@ class ModelService:
         Returns {"image": base64_jpeg_str, "results": str}.
         Returns {} if no frame is available within the timeout.
         """
-        self.model.set_query(query_text)
+        results = self.run_inference_many(query_text, num_frames=1, timeout_sec=2.0)
+        return results[0] if results else {}
+
+    def run_inference_many(self, query_text: str, num_frames: int, timeout_sec: float = 2.0) -> list[Dict[str, Any]]:
+        """
+        Run inference for query_text on up to num_frames camera frames.
+        Returns a list of {"frame_id","frame_ts","image","results"} dicts.
+        """
+        # Guardrails
         try:
-            frame_id, frame_ts, frame = self.frames.get(timeout=2.0)
-        except queue.Empty:
-            return {}
-        result = self.model.infer(frame)
-        return {
-            "frame_id": frame_id,
-            "frame_ts": frame_ts,
-            "image": encode_jpeg_b64(frame),
-            "results": result.get("summary", ""),
-        }
+            n = int(num_frames)
+        except Exception:
+            n = 1
+        n = max(1, min(n, 10))  # keep it reasonable
+
+        self.model.set_query(query_text)
+
+        out: list[Dict[str, Any]] = []
+        deadline = time.time() + float(timeout_sec)
+
+        while len(out) < n and time.time() < deadline:
+            try:
+                remaining = max(0.01, deadline - time.time())
+                frame_id, frame_ts, frame = self.frames.get(timeout=remaining)
+            except queue.Empty:
+                break
+
+            result = self.model.infer(frame)
+            out.append(
+                {
+                    "frame_id": frame_id,
+                    "frame_ts": frame_ts,
+                    "image": encode_jpeg_b64(frame),
+                    "results": result.get("summary", ""),
+                }
+            )
+
+        return out
