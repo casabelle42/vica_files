@@ -15,9 +15,10 @@ This keeps code separated:
 import os
 import sys
 import json
+import base64
+import hashlib
 import socket
 import threading
-import base64
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 from PyQt6.QtWidgets import QApplication
@@ -49,11 +50,14 @@ def _safe_extract_devices(response: dict) -> list:
         return response["available_devices"]
 
     body = response.get("body")
-    # Current discovery_response schema: { "body": { "devices": [ ... ] } }
-    if isinstance(body, dict) and isinstance(body.get("devices"), list):
-        return body["devices"]
-    if isinstance(body, dict) and isinstance(body.get("available_devices"), list):
-        return body["available_devices"]
+    if isinstance(body, dict):
+        # Current discovery_response packet shape:
+        # {"header": {..., "message_type": "discovery_response"}, "body": {"devices": [...]}}
+        if isinstance(body.get("devices"), list):
+            return body["devices"]
+        # Legacy compatibility path
+        if isinstance(body.get("available_devices"), list):
+            return body["available_devices"]
 
     return []
 
@@ -94,83 +98,61 @@ class UiDispatcher(QObject):
         super().__init__()
         self._window = window
         self.update_devices_signal.connect(self._window.update_devices)
-
-        # Query window is created lazily; handler will provide it when available.
-        self._get_query_window = None  # Callable[[], Any] | None
+        self._get_query_window = None
         self.process_query_packet_signal.connect(self._process_query_packet)
 
     def set_query_window_getter(self, getter):
         self._get_query_window = getter
 
     def _process_query_packet(self, pkt: Dict[str, Any], query_text: str) -> None:
-        """
-        Runs on the Qt main thread (signal/slot), so it can safely update widgets.
-        """
+        """Render query_response in QueryWindow on the Qt main thread."""
         qw = self._get_query_window() if callable(self._get_query_window) else None
         if not qw:
             print("[HOST_MAIN] query_response received but query window is not open")
             return
 
         try:
-            from PyQt6.QtGui import QPixmap
-            from PyQt6.QtCore import QByteArray, Qt
-
             body = (pkt or {}).get("body", {}) if isinstance(pkt, dict) else {}
             meta = body.get("metadata", {}) if isinstance(body, dict) else {}
             frame = body.get("frame", {}) if isinstance(body, dict) else {}
-
-            image_b64 = meta.get("image_base64") or ""
-            if not isinstance(image_b64, str) or not image_b64:
-                print("[HOST_MAIN] query_response has no image_base64")
-                return
-
-            # Decode base64 into a pixmap for the main preview.
-            pixmap = None
-            image_fingerprint = ""
-            try:
-                image_bytes = base64.b64decode(image_b64, validate=False)
-                # Fingerprint lets us confirm whether edge is reusing images across queries.
-                import hashlib
-                image_fingerprint = hashlib.sha1(image_bytes).hexdigest()[:10]
-                pm = QPixmap()
-                if pm.loadFromData(QByteArray(image_bytes)):
-                    pixmap = pm
-            except Exception:
-                pixmap = None
-
             header = (pkt or {}).get("header", {}) if isinstance(pkt, dict) else {}
-            detections = frame.get("detections") if isinstance(frame, dict) else None
+            detections = frame.get("detections") if isinstance(frame, dict) else []
             if not isinstance(detections, list):
                 detections = []
 
-            # Prefer a real text answer if the edge provides one.
+            image_b64 = meta.get("image_base64") or ""
+            image_fingerprint = ""
+            if isinstance(image_b64, str) and image_b64:
+                try:
+                    image_bytes = base64.b64decode(image_b64, validate=False)
+                    image_fingerprint = hashlib.sha1(image_bytes).hexdigest()[:10]
+                except Exception:
+                    image_b64 = ""
+
             answer_text = ""
-            if isinstance(body, dict):
-                for key in ("answer", "response", "results", "results_text"):
-                    v = body.get(key)
-                    if isinstance(v, str) and v.strip():
-                        answer_text = v.strip()
-                        break
-            # Fall back to first detection full text if present.
+            for key in ("answer", "response", "results", "results_text", "result"):
+                v = body.get(key) if isinstance(body, dict) else None
+                if isinstance(v, str) and v.strip():
+                    answer_text = v.strip()
+                    break
             if not answer_text and detections:
                 d0 = detections[0] if isinstance(detections[0], dict) else None
                 if isinstance(d0, dict):
                     dets0 = d0.get("dets")
-                    if isinstance(dets0, list) and dets0 and isinstance(dets0[0], str) and dets0[0].strip():
+                    if isinstance(dets0, list) and dets0 and isinstance(dets0[0], str):
                         answer_text = dets0[0].strip()
 
-            # Fall back to detections summary (common in current schema).
             det_labels = []
-            for d in detections[:3]:
-                if isinstance(d, dict):
-                    lbl = d.get("label")
-                    if isinstance(lbl, str) and lbl.strip():
-                        det_labels.append(lbl.strip())
-            det_summary = ", ".join(det_labels)
             max_conf = 0.0
-            for d in detections:
-                if isinstance(d, dict) and isinstance(d.get("confidence"), (int, float)):
-                    max_conf = max(max_conf, float(d["confidence"]))
+            for det in detections:
+                if not isinstance(det, dict):
+                    continue
+                lbl = det.get("label")
+                if isinstance(lbl, str) and lbl.strip():
+                    det_labels.append(lbl.strip())
+                conf = det.get("confidence")
+                if isinstance(conf, (int, float)):
+                    max_conf = max(max_conf, float(conf))
 
             chunk_index = meta.get("chunk_index", 0)
             total_chunks = meta.get("total_chunks", 1)
@@ -183,36 +165,21 @@ class UiDispatcher(QObject):
             except Exception:
                 total_chunks_i = 1
 
-            image_metadata = {
+            gui_metadata = {
                 "image": f"Frame {chunk_index_i + 1}/{total_chunks_i}" + (f" • {image_fingerprint}" if image_fingerprint else ""),
                 "edge_device": header.get("source_device", "Unknown"),
                 "query": query_text or "User query",
-                "response": answer_text or det_summary or "No response text",
+                "response": answer_text or ", ".join(det_labels) or "No response text",
                 "confidence_rate": f"{max_conf * 100:.1f}%",
                 "time_processed": str(header.get("timestamp") or datetime.now().isoformat())[:19],
             }
 
-            # Add thumbnail/image to returned list
-            if hasattr(qw, "add_returned_image"):
-                qw.add_returned_image(image_b64, metadata=image_metadata)
-
-            # Update main preview immediately (so it doesn't look "reused")
-            if pixmap is not None and hasattr(qw, "image_label"):
-                try:
-                    qw.image_label.setPixmap(
-                        pixmap.scaled(
-                            qw.image_label.width(),
-                            qw.image_label.height(),
-                            Qt.AspectRatioMode.KeepAspectRatio,
-                            Qt.TransformationMode.SmoothTransformation,
-                        )
-                    )
-                except Exception:
-                    pass
-
-            # Update metadata panel to latest packet
+            if image_b64 and hasattr(qw, "add_returned_image"):
+                qw.add_returned_image(image_b64, metadata=gui_metadata)
             if hasattr(qw, "update_metadata"):
-                qw.update_metadata(image_metadata)
+                qw.update_metadata(gui_metadata)
+            if hasattr(qw, "set_query_pending"):
+                qw.set_query_pending(False)
         except Exception as e:
             print(f"[HOST_MAIN] Failed to render query_response: {e!r}")
 
@@ -293,10 +260,6 @@ def main():
         with devices_lock:
             gui_devices = list(devices_by_name.values())
         ui.update_devices_signal.emit(gui_devices)
-
-    # Track latest query text/id so query_response rendering can label + filter it.
-    # MUST be defined before we register the MQTT on_packet callback, because packets
-    # can arrive immediately after connect/subscribe.
     current_query_text_lock = threading.Lock()
     current_query_text = {"text": ""}
     current_query_id_lock = threading.Lock()
@@ -357,8 +320,8 @@ def main():
                     _emit_full_device_list()
                 return
 
+            # query_response arriving via the general results stream — handle directly.
             if msg_type == "query_response":
-                # Filter out stale query_response packets from previous queries.
                 body = pkt.get("body", {}) if isinstance(pkt, dict) else {}
                 pkt_qid = body.get("query_id") if isinstance(body, dict) else None
                 with current_query_id_lock:
@@ -368,9 +331,9 @@ def main():
 
                 with current_query_text_lock:
                     qt = current_query_text.get("text", "")
-                # Update GUI on Qt thread (thread-safe)
                 ui.process_query_packet_signal.emit(pkt, qt)
                 return
+
         except Exception as e:
             print(f"[HOST_MAIN] Packet handler error: {e!r}")
 
@@ -386,8 +349,6 @@ def main():
         on_discover=None,  # set below
         on_query=None,     # set below
     )
-
-    # Let UI dispatcher find the active query window when packets arrive
     ui.set_query_window_getter(handler._get_query_window)
 
     def on_discover_clicked():
@@ -425,11 +386,6 @@ def main():
         threading.Thread(target=worker, daemon=True).start()
 
     def on_query_sent(query_text: str):
-        """
-        Called when the GUI Send button is clicked in the Query window.
-        Sends a query request. For now, prints the response.
-        (You can later route images/metadata back into GUIHandler methods.)
-        """
         query_text = (query_text or "").strip()
         if not query_text:
             print("[HOST_MAIN] Query text empty — ignoring.")
@@ -438,31 +394,26 @@ def main():
         with current_query_text_lock:
             current_query_text["text"] = query_text
 
-        # Clear previous images when starting a new query (if query window exists)
         try:
             qw = handler._get_query_window()
-            if qw and hasattr(qw, "clear_returned_images"):
-                qw.clear_returned_images()
+            if qw and hasattr(qw, "set_query_pending"):
+                qw.set_query_pending(True, "Pending response...")
         except Exception:
             pass
 
-        # Send query_request async and remember query_id for filtering.
         try:
             qid = sender.send_query_request(query_text)
             with current_query_id_lock:
                 current_query_id["id"] = qid
+            print(f"[HOST_MAIN] Query request sent (query_id={qid})")
         except Exception as e:
             print(f"[HOST_MAIN] Failed to send query_request: {e!r}")
-            return
-
-        def worker():
             try:
-                print("[HOST_MAIN] Query request sent (async); waiting for query_response packets...")
-
-            except Exception as e:
-                print(f"[HOST_MAIN] Query failed: {e}")
-
-        threading.Thread(target=worker, daemon=True).start()
+                qw = handler._get_query_window()
+                if qw and hasattr(qw, "set_query_pending"):
+                    qw.set_query_pending(False)
+            except Exception:
+                pass
 
     # Tell the handler which functions to call for real user clicks
     handler.set_network_callbacks(on_discover=on_discover_clicked, on_query=on_query_sent)

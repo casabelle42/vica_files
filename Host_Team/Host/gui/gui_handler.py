@@ -464,6 +464,11 @@ class GUIHandler(QObject):
                 self.available_devices_window.set_discover_callback(self._handle_ui_discover_clicked)
             except Exception as e:
                 logger.warning(f"Failed to set discover callback: {e}")
+        if self.available_devices_window and hasattr(self.available_devices_window, "set_query_callback"):
+            try:
+                self.available_devices_window.set_query_callback(self._handle_ui_query_sent)
+            except Exception as e:
+                logger.warning(f"Failed to set query callback on devices window: {e}")
 
         # Wrap query window creation so we can bind the send callback every time it opens
         if self.available_devices_window and hasattr(self.available_devices_window, "_open_query_window"):
@@ -483,10 +488,9 @@ class GUIHandler(QObject):
 
                 self.available_devices_window._open_query_window = wrapped_open_query_window
                 setattr(self.available_devices_window, "_gui_handler_wrapped_open_query", True)
-
                 # IMPORTANT: Qt signal connections capture the bound method at connect-time.
-                # s3_availableDevices connects query_btn.clicked to the *original* method during init,
-                # so replacing the attribute isn't enough; we must reconnect the signal.
+                # s3_availableDevices connects query_btn.clicked to the original method
+                # during window init, so replacing the attribute is not enough; reconnect.
                 try:
                     btn = getattr(self.available_devices_window, "query_btn", None)
                     if btn is not None and hasattr(btn, "clicked"):
