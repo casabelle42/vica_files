@@ -14,6 +14,9 @@ from dataclasses import dataclass
 from typing import Optional, Dict, Any, Callable
 import psutil
 import cv2
+import torch
+from PIL import Image
+from transformers import AutoProcessor, AutoModelForVision2Seq
 
 # ========= Configuration =========
 
@@ -29,6 +32,9 @@ class Config:
     # Results
     # How many frames to return per query (as chunked query_response packets).
     RETURN_FRAMES: int = int(os.getenv("RETURN_FRAMES", "3"))
+    # Model
+    MODEL_ID: str = os.getenv("MODEL_ID", "nvidia/Cosmos-Reason1-7B")
+    MAX_NEW_TOKENS: int = int(os.getenv("MAX_NEW_TOKENS", "128"))
     # Container/Model
     CONTAINER_NAME: str = os.getenv("CONTAINER_NAME", "nano-vlm")
     DOCKER_IMAGE: str = os.getenv("DOCKER_IMAGE", "yourrepo/nano-vlm:jetson")
@@ -82,19 +88,24 @@ def ensure_container_running() -> None:
 
 class NanoVLM:
     """
-    Placeholder for your quantized VILA / LLaVA stack.
-    Replace TODOs with real loads/inference on Jetson.
+    Cosmos Reason (Qwen2.5-VL) wrapper.
     """
     def __init__(self):
         self.loaded = False
         self.paused = False
         self.current_query: Optional[str] = None
+        self.processor = None
+        self.model = None
 
     def load(self):
-        # TODO: import torch/transformers; warm up CUDA; load quantized weights
-        # e.g., torch.set_default_dtype(...); model = AutoModel.from_pretrained(..., device_map="cuda")
-        # NOTE: first load may take ~1–2 minutes on Jetson (per docs)
-        time.sleep(3)  # simulate load
+        # Load once; keep resident for subsequent queries.
+        self.processor = AutoProcessor.from_pretrained(CFG.MODEL_ID, trust_remote_code=True)
+        self.model = AutoModelForVision2Seq.from_pretrained(
+            CFG.MODEL_ID,
+            device_map="auto",
+            torch_dtype="auto",
+            trust_remote_code=True,
+        )
         self.loaded = True
 
     def set_query(self, q: Optional[str]):
@@ -110,15 +121,48 @@ class NanoVLM:
         """
         Run per-frame inference. Return *structured* results.
         """
-        # TODO: Live LLaVA → candidate frames → Nano VLM classification
-        # Minimal stub result:
-        h, w = frame_bgr.shape[:2]
-        return {
-            "summary": f"Stub result for query='{self.current_query or ''}' on frame {w}x{h}",
-            "detections": [
-                # Example: {"label": "white_car", "conf": 0.42, "bbox": [x1,y1,x2,y2]}
-            ]
-        }
+        if not self.loaded or self.model is None or self.processor is None:
+            raise RuntimeError("Model not loaded")
+
+        # OpenCV BGR -> PIL RGB
+        rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+        img = Image.fromarray(rgb)
+
+        question = (self.current_query or "").strip() or "Describe what you see."
+
+        # Use chat template so the model receives an image token.
+        messages = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image"},
+                    {"type": "text", "text": question},
+                ],
+            }
+        ]
+        prompt_text = self.processor.apply_chat_template(messages, add_generation_prompt=True)
+
+        inputs = self.processor(text=prompt_text, images=img, return_tensors="pt")
+        inputs = {k: v.to(self.model.device) for k, v in inputs.items()}
+
+        with torch.no_grad():
+            out = self.model.generate(**inputs, max_new_tokens=CFG.MAX_NEW_TOKENS)
+
+        decoded = self.processor.batch_decode(out, skip_special_tokens=True)[0]
+        return {"summary": _strip_assistant(decoded), "detections": []}
+
+
+def _strip_assistant(text: str) -> str:
+    """
+    Cosmos decode often includes the full chat transcript. Keep only assistant response.
+    """
+    if not isinstance(text, str):
+        return str(text)
+    idx = text.lower().rfind("assistant")
+    if idx == -1:
+        return text.strip()
+    # Keep content after the last "assistant" marker
+    return text[idx + len("assistant") :].strip().lstrip(":").strip()
 
 # ========= Camera worker =========
 
