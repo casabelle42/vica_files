@@ -143,13 +143,29 @@ class MQTTHostClient:
         self.outgoing_queue.put(("host/control", pkt))
         print("[MQTTHostClient] Queued discovery request")
 
-    def send_query_request(self, query: str, query_id: str | None = None):
+    def send_query_request(
+        self,
+        query: str,
+        query_id: str | None = None,
+        target_devices: list[str] | None = None,
+        target_device: str | None = None,
+        model: str | None = None,
+    ):
         query_id = str(query_id or uuid.uuid4())
+        # Normalise targets.
+        targets = [t for t in (target_devices or []) if isinstance(t, str) and t.strip()]
+        target_device = str(target_device).strip() if isinstance(target_device, str) else ""
+        if not target_device and len(targets) == 1:
+            target_device = targets[0]
+
         pkt = {
             "header": self._make_header("query_request"),
             "body": {
                 "query_id": query_id,
                 "query": str(query or ""),
+                **({"target_device": target_device} if target_device else {}),
+                **({"target_devices": targets} if targets else {}),
+                **({"model": str(model).strip()} if isinstance(model, str) and str(model).strip() else {}),
             },
         }
         self.outgoing_queue.put(("host/control", pkt))
@@ -184,8 +200,13 @@ class MQTTHostClient:
 
     def start_background(self):
         """Connect and run publish loop in a background thread (Qt-friendly)."""
-        self.mqtt_client.connect(self.mqtt_broker, self.mqtt_port, 60)
-        self.mqtt_client.loop_start()
+        # Non-blocking connect so the GUI can start even if broker is unreachable.
+        # Paho will keep retrying in the background once loop_start() is running.
+        try:
+            self.mqtt_client.connect_async(self.mqtt_broker, self.mqtt_port, 60)
+            self.mqtt_client.loop_start()
+        except Exception as e:
+            print(f"[MQTTHostClient] Failed to start MQTT loop: {e!r}")
 
         if self._publisher_thread and self._publisher_thread.is_alive():
             return
@@ -210,8 +231,12 @@ class MQTTHostClient:
 
     def start(self):
         """Single entry point — connect once, loop forever."""
-        self.mqtt_client.connect(self.mqtt_broker, self.mqtt_port, 60)
-        self.mqtt_client.loop_start()
+        # Non-blocking connect; loop will reconnect in background.
+        try:
+            self.mqtt_client.connect_async(self.mqtt_broker, self.mqtt_port, 60)
+            self.mqtt_client.loop_start()
+        except Exception as e:
+            print(f"[MQTTHostClient] Failed to start MQTT loop: {e!r}")
         print("[MQTTHostClient] Listening for messages...")
         try:
             while True:
@@ -270,12 +295,18 @@ class HostCommandSender:
         self._client.send_command(str(command or "command"), params=(cmd or {}))
         return {}
 
-    def send_query_request(self, query_text: str, query_id: str | None = None):
+    def send_query_request(
+        self,
+        query_text: str,
+        *,
+        target_devices: list[str] | None = None,
+        query_id: str | None = None,
+    ):
         """
         Send a query_request packet and return the query_id immediately.
         Use this for async UI flows that render query_response packets via on_packet.
         """
-        return self._client.send_query_request(query_text, query_id=query_id)
+        return self._client.send_query_request(query_text, query_id=query_id, target_devices=target_devices)
 
     def close(self):
         self._client.stop_background()

@@ -10,6 +10,8 @@ from PyQt6.QtGui import (
 )
 from PyQt6.QtWidgets import (
     QApplication,
+    QCheckBox,
+    QComboBox,
     QGraphicsDropShadowEffect,
     QHBoxLayout,
     QLabel,
@@ -170,7 +172,12 @@ class MainWindow(QMainWindow):
         self.device_widgets: dict[str, dict] = {}
         self._on_discover_callback         = None
         self._on_query_callback            = None
+        self._on_auto_resend_changed       = None
         self._query_window                 = None
+        # Names of devices the user has checked as targets for the next query.
+        self._selected_devices: set[str]   = set()
+        # Per-device model selection (placeholders until Jetsons report models).
+        self._selected_model_by_device: dict[str, str] = {}
 
         # ── root ──────────────────────────────────────────────────────────────
         root = QWidget()
@@ -184,7 +191,11 @@ class MainWindow(QMainWindow):
         mid.content_layout().setContentsMargins(14, 14, 14, 10)
         mid.content_layout().setSpacing(10)
 
-        # Title label inside the card, above the white panel
+        # Title row: "Available Devices" on the left, selection summary on the right.
+        title_row = QHBoxLayout()
+        title_row.setContentsMargins(0, 0, 0, 0)
+        title_row.setSpacing(10)
+
         lbl = QLabel("Available Devices")
         tf  = QFont("Segoe UI", 14)
         tf.setWeight(QFont.Weight.DemiBold)
@@ -192,7 +203,39 @@ class MainWindow(QMainWindow):
         lbl.setFont(tf)
         lbl.setStyleSheet("color: #FFFFFF; background: transparent;")
         lbl.setAlignment(Qt.AlignmentFlag.AlignLeft)
-        mid.content_layout().addWidget(lbl)
+        title_row.addWidget(lbl)
+        title_row.addStretch(1)
+
+        self.selection_summary_lbl = QLabel("Target: All devices (broadcast)")
+        sf = QFont("Segoe UI", 10)
+        sf.setWeight(QFont.Weight.Medium)
+        self.selection_summary_lbl.setFont(sf)
+        self.selection_summary_lbl.setStyleSheet(
+            "color: rgba(255,255,255,0.78); background: transparent;"
+        )
+        title_row.addWidget(self.selection_summary_lbl)
+
+        self.clear_selection_btn = QPushButton("Clear")
+        self.clear_selection_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.clear_selection_btn.setFixedHeight(24)
+        self.clear_selection_btn.setStyleSheet(
+            "QPushButton {"
+            "  background-color: rgba(184,221,255,0.18);"
+            "  color: rgba(255,255,255,0.85);"
+            "  border: 1px solid rgba(184,221,255,0.30);"
+            "  border-radius: 6px;"
+            "  padding: 0 10px;"
+            "}"
+            "QPushButton:hover  { background-color: rgba(184,221,255,0.30); }"
+            "QPushButton:pressed{ background-color: rgba(184,221,255,0.10); }"
+            "QPushButton:disabled{ color: rgba(255,255,255,0.30);"
+            "  border-color: rgba(255,255,255,0.10); }"
+        )
+        self.clear_selection_btn.clicked.connect(self._clear_selection)
+        self.clear_selection_btn.setEnabled(False)
+        title_row.addWidget(self.clear_selection_btn)
+
+        mid.content_layout().addLayout(title_row)
 
         # White device list panel sits directly below the label
         self.devices_panel = QWidget()
@@ -256,6 +299,10 @@ class MainWindow(QMainWindow):
         """Set callback invoked when Query window sends text."""
         self._on_query_callback = callback
 
+    def set_auto_resend_changed_callback(self, callback):
+        """Set callback invoked when Query window auto-resend settings change."""
+        self._on_auto_resend_changed = callback
+
     def update_devices(self, devices: list):
         self.devices = devices
         for wd in self.device_widgets.values():
@@ -266,9 +313,36 @@ class MainWindow(QMainWindow):
             if item.widget(): item.widget().deleteLater()
         for d in devices:
             self._create_device_row(d, self._panel_layout)
+        # Drop selections that no longer exist in the new device list.
+        live_names = {d.get("name") for d in devices if d.get("name")}
+        self._selected_devices &= live_names
+        self._refresh_selection_summary()
         self._panel_layout.invalidate()
         self.devices_panel.adjustSize()
         self.devices_panel.update()
+
+    def selected_devices(self) -> list[str]:
+        """Return the current set of devices the user has marked as targets."""
+        return [name for name in self._selected_devices]
+
+    def get_selected_model_for_device(self, device_name: str) -> str:
+        """Return the selected model for a device (placeholder-safe)."""
+        device_name = str(device_name or "").strip()
+        if not device_name:
+            return "default"
+        return str(self._selected_model_by_device.get(device_name) or "default")
+
+    def set_selected_devices(self, names) -> None:
+        """Programmatically replace the current selection (e.g. from QueryWindow chips)."""
+        names = set(names or [])
+        self._selected_devices = {n for n in names if n in self.device_widgets}
+        for name, wd in self.device_widgets.items():
+            cb = wd.get("checkbox")
+            if isinstance(cb, QCheckBox):
+                cb.blockSignals(True)
+                cb.setChecked(name in self._selected_devices)
+                cb.blockSignals(False)
+        self._refresh_selection_summary()
 
     def add_device(self, device: dict):
         self.devices.append(device)
@@ -286,6 +360,12 @@ class MainWindow(QMainWindow):
         if "status"     in status: wd["status_label"].setText(f"Status: {status['status']}")
         if "connection" in status: wd["connection_label"].setText(f"Connection: {status['connection']}")
         if "metadata"   in status: wd["metadata_label"].setText(f"Metadata: {status['metadata']}")
+        # Optional: if device reports model list, update the per-device dropdown.
+        if "model_combo" in wd:
+            if "models" in status:
+                self._update_device_models(name, status.get("models"), wd["model_combo"])
+            elif "available_models" in status:
+                self._update_device_models(name, status.get("available_models"), wd["model_combo"])
         for d in self.devices:
             if d["name"] == name: d.update(status); break
 
@@ -301,17 +381,59 @@ class MainWindow(QMainWindow):
             self._query_window = QueryWindow()
             if self._on_query_callback and hasattr(self._query_window, "set_query_callback"):
                 self._query_window.set_query_callback(self._on_query_callback)
+            if self._on_auto_resend_changed and hasattr(self._query_window, "set_auto_resend_changed_callback"):
+                self._query_window.set_auto_resend_changed_callback(self._on_auto_resend_changed)
+            # Seed the new window with whatever the user has selected.
+            if hasattr(self._query_window, "set_target_devices"):
+                self._query_window.set_target_devices(self.selected_devices())
+            # Provide a list of all known device names so the chip "Add target" picker
+            # can show the full inventory, not just the currently checked ones.
+            if hasattr(self._query_window, "set_available_devices"):
+                self._query_window.set_available_devices(list(self.device_widgets.keys()))
+            # When the user removes a chip in the QueryWindow, mirror it back to
+            # the checkboxes here so both views stay coherent.
+            if hasattr(self._query_window, "set_targets_changed_callback"):
+                self._query_window.set_targets_changed_callback(self.set_selected_devices)
             self._query_window.show()
         else:
             if self._on_query_callback and hasattr(self._query_window, "set_query_callback"):
                 self._query_window.set_query_callback(self._on_query_callback)
+            if self._on_auto_resend_changed and hasattr(self._query_window, "set_auto_resend_changed_callback"):
+                self._query_window.set_auto_resend_changed_callback(self._on_auto_resend_changed)
+            if hasattr(self._query_window, "set_target_devices"):
+                self._query_window.set_target_devices(self.selected_devices())
+            if hasattr(self._query_window, "set_available_devices"):
+                self._query_window.set_available_devices(list(self.device_widgets.keys()))
+            if hasattr(self._query_window, "set_targets_changed_callback"):
+                self._query_window.set_targets_changed_callback(self.set_selected_devices)
             self._query_window.raise_()
             self._query_window.activateWindow()
 
     def _exit_application(self):
         QApplication.instance().quit()
 
+    def _update_device_models(self, device_name: str, models, combo: QComboBox) -> None:
+        """Replace dropdown items for a device, keeping selection when possible."""
+        models_list: list[str] = []
+        if isinstance(models, list):
+            models_list = [str(m) for m in models if str(m).strip()]
+        if not models_list:
+            # Placeholder: show ONLY default until Jetson reports real list.
+            models_list = ["default"]
+
+        current = self.get_selected_model_for_device(device_name)
+        if current not in models_list:
+            current = models_list[0]
+            self._selected_model_by_device[str(device_name)] = current
+
+        combo.blockSignals(True)
+        combo.clear()
+        combo.addItems(models_list)
+        combo.setCurrentText(current if current in models_list else models_list[0])
+        combo.blockSignals(False)
+
     def _create_device_row(self, device: dict, layout: QVBoxLayout):
+        device_name = device.get("name", "Unknown")
         row = QWidget()
         row.setFixedHeight(92)
         row.setStyleSheet(
@@ -323,6 +445,30 @@ class MainWindow(QMainWindow):
         rl.setContentsMargins(14, 8, 14, 8)
         rl.setSpacing(14)
 
+        # Selection checkbox: lets user pick which device(s) the next query targets.
+        checkbox = QCheckBox()
+        checkbox.setCursor(Qt.CursorShape.PointingHandCursor)
+        checkbox.setToolTip("Include this device when sending the next query")
+        checkbox.setChecked(device_name in self._selected_devices)
+        checkbox.setStyleSheet(
+            "QCheckBox { background: transparent; }"
+            "QCheckBox::indicator {"
+            "  width: 18px; height: 18px;"
+            "  border: 1.5px solid #131A5C;"
+            "  border-radius: 4px;"
+            "  background: rgba(255,255,255,0.95);"
+            "}"
+            "QCheckBox::indicator:hover { border-color: #1D2BA1; }"
+            "QCheckBox::indicator:checked {"
+            "  background: #1D2BA1; border-color: #1D2BA1;"
+            "  image: none;"
+            "}"
+        )
+        checkbox.toggled.connect(
+            lambda checked, name=device_name: self._on_device_checked(name, checked)
+        )
+        rl.addWidget(checkbox)
+
         thumb = QLabel()
         thumb.setFixedSize(72, 72)
         thumb.setStyleSheet("background: transparent; border: none;")
@@ -331,7 +477,7 @@ class MainWindow(QMainWindow):
         rl.addWidget(thumb)
 
         info = QVBoxLayout(); info.setSpacing(2)
-        nlbl = QLabel(device.get("name", "Unknown"))
+        nlbl = QLabel(device_name)
         nf = QFont("Segoe UI", 11); nf.setWeight(QFont.Weight.DemiBold)
         nf.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, 0)
         nlbl.setFont(nf)
@@ -358,11 +504,87 @@ class MainWindow(QMainWindow):
         sc.addWidget(slbl); sc.addWidget(clbl); sc.addWidget(mlbl)
         rl.addLayout(sc, stretch=2)
 
+        # Per-device model selection dropdown (placeholder list until Jetson provides models).
+        model_combo = QComboBox()
+        model_combo.setCursor(Qt.CursorShape.PointingHandCursor)
+        model_combo.setMinimumWidth(170)
+        model_combo.setFont(QFont("Segoe UI", 9))
+        model_combo.setToolTip("Select model for this device")
+        model_combo.setStyleSheet(
+            "QComboBox {"
+            "  background-color: rgba(19,26,92,0.06);"
+            "  border: 1px solid rgba(19,26,92,0.14);"
+            "  border-radius: 10px;"
+            "  padding: 6px 10px;"
+            "  color: #131A5C;"
+            "}"
+            "QComboBox QAbstractItemView {"
+            "  background-color: #FFFFFF;"
+            "  color: #131A5C;"
+            "  selection-background-color: rgba(29,43,161,0.18);"
+            "}"
+        )
+        self._update_device_models(
+            device_name,
+            device.get("models") or device.get("available_models"),
+            model_combo,
+        )
+
+        def _on_model_changed(text, name=device_name):  # noqa: ANN001
+            self._selected_model_by_device[str(name)] = str(text or "default")
+
+        model_combo.currentTextChanged.connect(_on_model_changed)
+        rl.addWidget(model_combo, stretch=0)
+
         layout.addWidget(row)
-        self.device_widgets[device["name"]] = {
-            "row": row, "name_label": nlbl, "location_label": lloc,
+        self.device_widgets[device_name] = {
+            "row": row, "checkbox": checkbox,
+            "name_label": nlbl, "location_label": lloc,
             "status_label": slbl, "connection_label": clbl, "metadata_label": mlbl,
+            "model_combo": model_combo,
         }
+
+    # ── selection helpers ─────────────────────────────────────────────────────
+    def _on_device_checked(self, name: str, checked: bool) -> None:
+        if checked:
+            self._selected_devices.add(name)
+        else:
+            self._selected_devices.discard(name)
+        self._refresh_selection_summary()
+        # Keep the linked QueryWindow chips bar in sync if it's open.
+        if self._query_window is not None and hasattr(self._query_window, "set_target_devices"):
+            try:
+                self._query_window.set_target_devices(self.selected_devices())
+            except Exception as exc:
+                print(f"[AvailableDevices] Failed to sync targets to query window: {exc!r}")
+
+    def _clear_selection(self) -> None:
+        if not self._selected_devices:
+            return
+        self._selected_devices.clear()
+        for wd in self.device_widgets.values():
+            cb = wd.get("checkbox")
+            if isinstance(cb, QCheckBox):
+                cb.blockSignals(True)
+                cb.setChecked(False)
+                cb.blockSignals(False)
+        self._refresh_selection_summary()
+        if self._query_window is not None and hasattr(self._query_window, "set_target_devices"):
+            try:
+                self._query_window.set_target_devices([])
+            except Exception:
+                pass
+
+    def _refresh_selection_summary(self) -> None:
+        count = len(self._selected_devices)
+        if count == 0:
+            self.selection_summary_lbl.setText("Target: All devices (broadcast)")
+        elif count == 1:
+            only = next(iter(self._selected_devices))
+            self.selection_summary_lbl.setText(f"Target: {only}")
+        else:
+            self.selection_summary_lbl.setText(f"Target: {count} devices selected")
+        self.clear_selection_btn.setEnabled(count > 0)
 
 
 def main():

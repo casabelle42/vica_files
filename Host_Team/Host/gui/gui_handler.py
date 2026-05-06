@@ -26,7 +26,7 @@ class GUIHandler(QObject):
     
     def __init__(self, available_devices_window=None, query_window=None,
                  on_discover: Optional[Callable[[], None]] = None,
-                 on_query: Optional[Callable[[str], None]] = None):
+                 on_query: Optional[Callable[..., None]] = None):
         """
         Initialize the GUI handler.
         
@@ -445,7 +445,7 @@ class GUIHandler(QObject):
 
     def set_network_callbacks(self,
                               on_discover: Optional[Callable[[], None]] = None,
-                              on_query: Optional[Callable[[str], None]] = None) -> None:
+                              on_query: Optional[Callable[..., None]] = None) -> None:
         """Register functions that will be invoked when the user clicks UI buttons.
 
         Typical usage: pass functions that publish MQTT packets for discovery/query.
@@ -521,12 +521,20 @@ class GUIHandler(QObject):
         else:
             logger.info("[GUIHandler] Discover clicked, but no network callback registered")
 
-    def _handle_ui_query_sent(self, query_text: str) -> None:
-        """Called when the user clicks Send in the Query UI."""
-        if self._on_query_callback:
-            self._on_query_callback(query_text)
-        else:
+    def _handle_ui_query_sent(self, query_text: str, target_devices: Optional[List[str]] = None) -> None:
+        """Called when the user clicks Send in the Query UI.
+
+        Accepts the optional ``target_devices`` list (added for the multi-device
+        targeting feature). Falls back gracefully if a legacy single-arg callback
+        is registered.
+        """
+        if not self._on_query_callback:
             logger.info(f"[GUIHandler] Query sent '{query_text}', but no network callback registered")
+            return
+        try:
+            self._on_query_callback(query_text, target_devices or [])
+        except TypeError:
+            self._on_query_callback(query_text)
 
     # ==================== Helper Methods ====================
     
