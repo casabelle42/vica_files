@@ -1,14 +1,96 @@
+# =========================
+# Python
+# =========================
 __pycache__/
 *.py[cod]
 *$py.class
 
-# pytest
-.pytest_cache/
-
-# virtualenv
+# Virtual environments
 .venv/
 venv/
+env/
 
-# OS/editor
+# Pytest
+.pytest_cache/
+
+# Build artifacts
+build/
+dist/
+*.egg-info/
+
+# =========================
+# VS Code
+# =========================
+.vscode/
+
+# =========================
+# Environment Variables
+# =========================
+.env
+.env.*
+
+# =========================
+# Logs
+# =========================
+*.log
+
+# =========================
+# OS Files
+# =========================
 .DS_Store
 Thumbs.db
+
+# =========================
+# Isaac Sim / Omniverse
+# =========================
+*.usd
+*.usda
+*.usdc
+*.usdcrc
+*.mdl
+
+# Generated datasets
+synthetic_datasets/
+datasets/
+outputs/
+output/
+
+# Large generated images
+*.png
+*.jpg
+*.jpeg
+*.exr
+
+# Metadata outputs
+*.json
+
+# Archives
+*.zip
+*.7z
+*.rar
+*.tar
+*.gz
+
+# =========================
+# AI / Model Files
+# =========================
+*.pt
+*.pth
+*.onnx
+*.engine
+*.ckpt
+
+# =========================
+# Temporary Files
+# =========================
+tmp/
+temp/
+*.tmp
+
+# =========================
+# SSH / Keys
+# =========================
+*.pem
+*.key
+id_rsa
+id_ed25519
