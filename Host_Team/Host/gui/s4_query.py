@@ -3,6 +3,7 @@ from pathlib import Path
 import os
 import sys
 import math
+import time
 import base64
 
 from PyQt6.QtCore import Qt, QRectF, QPointF, QTimer, pyqtSignal, QObject
@@ -574,7 +575,7 @@ class MainWindow(QMainWindow):
         self.setMinimumSize(860, 580)
 
         self._on_query_callback = None
-        self._on_auto_resend_changed: Optional[Callable[[bool, int], None]] = None
+        self._on_auto_resend_changed: Optional[Callable[[bool, int, int], None]] = None
         self._auto_resend_enabled: bool = False
         self._popout_windows: List[ResponsePopoutWindow] = []
         self._auto_separate: bool = False
@@ -600,6 +601,10 @@ class MainWindow(QMainWindow):
         self._spinner_index = 0
         self._pending_message_base = "Pending response..."
         self._pending_active = False
+        self._session_deadline_ts: Optional[float] = None
+        self._session_deadline_timer = QTimer(self)
+        self._session_deadline_timer.setInterval(250)
+        self._session_deadline_timer.timeout.connect(self._tick_session_deadline)
         # #16 Query timeout warning.
         self._query_timeout_ms = 20_000
         self._timeout_timer = QTimer(self)
@@ -742,8 +747,7 @@ class MainWindow(QMainWindow):
 
         ql.addLayout(btn_row)
 
-        # Auto resend controls (host-driven; sequential to avoid overloading pipeline)
-        # We resend immediately after each response (model-latency paced), so only Duration matters.
+        # Auto resend controls (host-driven; interval paces new sends after each response).
         auto_row = QHBoxLayout()
         auto_row.setSpacing(10)
         auto_row.setContentsMargins(0, 0, 0, 0)
@@ -760,7 +764,33 @@ class MainWindow(QMainWindow):
         self.auto_resend_btn.toggled.connect(self._on_auto_resend_toggled)
         auto_row.addWidget(self.auto_resend_btn)
 
-        for_lbl = QLabel("For")
+        every_lbl = QLabel("Every")
+        every_lbl.setStyleSheet("color: rgba(255,255,255,0.72); background: transparent;")
+        auto_row.addWidget(every_lbl)
+
+        self.auto_resend_interval = QSpinBox()
+        self.auto_resend_interval.setRange(1, 120)
+        self.auto_resend_interval.setValue(5)
+        self.auto_resend_interval.setSuffix(" s")
+        self.auto_resend_interval.setFixedWidth(80)
+        self.auto_resend_interval.setToolTip(
+            "Time between automatic sends while Auto Resend is on. "
+            "The host starts this timer after each successful send (not after each MQTT reply), "
+            "so a fast edge cannot reset the cadence and starve a slower one. Overlapping work on edges is allowed."
+        )
+        self.auto_resend_interval.setStyleSheet(
+            "QSpinBox {"
+            "  background-color: rgba(255,255,255,0.12);"
+            "  border: 1px solid rgba(184,221,255,0.35);"
+            "  border-radius: 8px;"
+            "  padding: 5px 10px;"
+            "  color: #FFFFFF;"
+            "}"
+        )
+        self.auto_resend_interval.valueChanged.connect(lambda _v: self._emit_auto_resend_changed())
+        auto_row.addWidget(self.auto_resend_interval)
+
+        for_lbl = QLabel("Run for")
         for_lbl.setStyleSheet("color: rgba(255,255,255,0.72); background: transparent;")
         auto_row.addWidget(for_lbl)
 
@@ -769,7 +799,11 @@ class MainWindow(QMainWindow):
         self.auto_resend_duration.setValue(0)
         self.auto_resend_duration.setSuffix(" s")
         self.auto_resend_duration.setFixedWidth(100)
-        self.auto_resend_duration.setToolTip("0 = run indefinitely until toggled off")
+        self.auto_resend_duration.setToolTip(
+            "Wall clock from Send: last auto-query is allowed before this time runs out. "
+            "0 = keep sending until you turn Auto Resend off. "
+            "Next send is scheduled after each reply, at least 'Every' seconds after the last send."
+        )
         self.auto_resend_duration.setStyleSheet(
             "QSpinBox {"
             "  background-color: rgba(255,255,255,0.12);"
@@ -784,6 +818,16 @@ class MainWindow(QMainWindow):
 
         auto_row.addStretch(1)
         ql.addLayout(auto_row)
+
+        self.auto_resend_session_lbl = QLabel("")
+        srf = QFont("Segoe UI", 10)
+        srf.setWeight(QFont.Weight.Medium)
+        self.auto_resend_session_lbl.setFont(srf)
+        self.auto_resend_session_lbl.setStyleSheet(
+            "color: rgba(184,221,255,0.95); background: transparent;"
+        )
+        self.auto_resend_session_lbl.setVisible(False)
+        ql.addWidget(self.auto_resend_session_lbl)
 
         status_row = QHBoxLayout()
         status_row.setSpacing(12)
@@ -1016,21 +1060,48 @@ class MainWindow(QMainWindow):
         self._on_query_callback = callback
 
     def set_auto_resend_changed_callback(self, callback: Optional[Callable[[bool, int, int], None]]):
-        """Owner registers a callback fired when auto-resend changes."""
+        """Owner registers a callback fired when auto-resend changes: (enabled, interval_sec, duration_sec)."""
         self._on_auto_resend_changed = callback
 
     def auto_resend_enabled(self) -> bool:
         return bool(self._auto_resend_enabled)
 
     def auto_resend_interval_sec(self) -> int:
-        # Interval is intentionally not user-configurable: auto-resend is paced by model latency.
-        return 0
+        try:
+            return max(1, int(self.auto_resend_interval.value()))
+        except Exception:
+            return 5
 
     def auto_resend_duration_sec(self) -> int:
         try:
             return int(self.auto_resend_duration.value())
         except Exception:
             return 0
+
+    def set_auto_resend_session_deadline(self, unix_ts: Optional[float]) -> None:
+        """Show countdown to session end (time.time() deadline), or hide when None."""
+        self._session_deadline_ts = unix_ts
+        self._session_deadline_timer.stop()
+        if unix_ts is None or not isinstance(unix_ts, (int, float)):
+            self.auto_resend_session_lbl.clear()
+            self.auto_resend_session_lbl.setVisible(False)
+            return
+        self.auto_resend_session_lbl.setVisible(True)
+        self._session_deadline_timer.start()
+        self._tick_session_deadline()
+
+    def _tick_session_deadline(self) -> None:
+        ts = self._session_deadline_ts
+        if ts is None or not isinstance(ts, (int, float)):
+            self._session_deadline_timer.stop()
+            return
+        rem = float(ts) - time.time()
+        if rem <= 0:
+            self.auto_resend_session_lbl.setText("Session ended — no more auto-queries")
+            self._session_deadline_timer.stop()
+            return
+        sec_left = max(0, int(math.ceil(rem - 1e-9)))
+        self.auto_resend_session_lbl.setText(f"Last auto-query allowed in {sec_left}s")
 
     def set_targets_changed_callback(self, callback: Optional[Callable[[List[str]], None]]):
         """Owner registers a callback fired whenever the chip list changes.
@@ -1351,7 +1422,11 @@ class MainWindow(QMainWindow):
         cb = getattr(self, "_on_auto_resend_changed", None)
         if callable(cb):
             try:
-                cb(self.auto_resend_enabled(), self.auto_resend_interval_sec(), self.auto_resend_duration_sec())
+                cb(
+                    self.auto_resend_enabled(),
+                    self.auto_resend_interval_sec(),
+                    self.auto_resend_duration_sec(),
+                )
             except Exception:
                 pass
 

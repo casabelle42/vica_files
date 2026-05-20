@@ -32,6 +32,33 @@ from typing import Any, Callable, Dict, List, Optional, Protocol, runtime_checka
 from PyQt6.QtWidgets import QApplication
 from PyQt6.QtCore import QObject, pyqtSignal
 
+try:
+    from PyQt6 import sip
+except ImportError:
+    sip = None
+
+
+def _qt_object_alive(obj: Optional[QObject]) -> bool:
+    if obj is None:
+        return False
+    if sip is not None:
+        try:
+            return not sip.isdeleted(obj)
+        except Exception:
+            return True
+    return True
+
+
+def _safe_emit_signal(owner: Optional[QObject], sig, *args) -> bool:
+    """Emit from a non-Qt thread only if owner still exists (avoids deleted UiDispatcher)."""
+    if owner is None or not _qt_object_alive(owner):
+        return False
+    try:
+        sig.emit(*args)
+        return True
+    except RuntimeError:
+        return False
+
 
 # ---- Ensure project root is importable ----
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -160,7 +187,10 @@ def _to_gui_devices(raw_devices: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 # ─────────────────────────────────────────────────────────────────────────────
 class UiDispatcher(QObject):
     update_devices_signal = pyqtSignal(list)
-    process_query_packet_signal = pyqtSignal(dict, str)
+    process_query_packet_signal = pyqtSignal(dict, str, bool)
+    auto_resend_session_deadline_signal = pyqtSignal(object)
+    # Fired from the background auto-resend timer; slot runs on the Qt main thread.
+    auto_resend_due_signal = pyqtSignal()
 
     def __init__(self, window):
         super().__init__()
@@ -172,8 +202,13 @@ class UiDispatcher(QObject):
     def set_query_window_getter(self, getter):
         self._get_query_window = getter
 
-    def _process_query_packet(self, pkt: Dict[str, Any], query_text: str) -> None:
-        """Render query_response in QueryWindow on the Qt main thread."""
+    def _process_query_packet(self, pkt: Dict[str, Any], query_text: str, is_stale: bool = False) -> None:
+        """Render query_response in QueryWindow on the Qt main thread.
+
+        ``is_stale`` is True when the packet's query_id no longer matches the latest
+        send — still show the answer, but do not clear the pending spinner for the
+        current in-flight query.
+        """
         qw = self._get_query_window() if callable(self._get_query_window) else None
         # Fallback: in some wiring paths, the GUI handler getter may not be set
         # yet. The devices window still holds the QueryWindow reference.
@@ -237,10 +272,22 @@ class UiDispatcher(QObject):
             except Exception:
                 total_chunks_i = 1
 
+            qid_short = ""
+            if isinstance(body, dict):
+                q = body.get("query_id")
+                if isinstance(q, str) and q:
+                    qid_short = q[:8]
+
+            stale_note = ""
+            if is_stale and qid_short:
+                stale_note = f" • reply for query …{qid_short}"
+            elif is_stale:
+                stale_note = " • earlier query"
+
             gui_metadata = {
                 "image": f"Frame {chunk_index_i + 1}/{total_chunks_i}" + (f" • {image_fingerprint}" if image_fingerprint else ""),
                 "edge_device": header.get("source_device", "Unknown"),
-                "query": query_text or "User query",
+                "query": (query_text or "User query") + stale_note,
                 "response": answer_text or ", ".join(det_labels) or "No response text",
                 "confidence_rate": f"{max_conf * 100:.1f}%",
                 "time_processed": str(header.get("timestamp") or datetime.now().isoformat())[:19],
@@ -250,7 +297,7 @@ class UiDispatcher(QObject):
                 qw.add_returned_image(image_b64, metadata=gui_metadata)
             if hasattr(qw, "update_metadata"):
                 qw.update_metadata(gui_metadata)
-            if hasattr(qw, "set_query_pending"):
+            if hasattr(qw, "set_query_pending") and not is_stale:
                 qw.set_query_pending(False)
         except Exception as e:
             print(f"[HOST_MAIN] Failed to render query_response: {e!r}")
@@ -287,6 +334,7 @@ def run_app(backend: HostBackend,
     devices_window.show()
 
     ui = UiDispatcher(devices_window)
+    ui.setParent(app)
 
     # ---- Live device state shared between discovery_response and device_status ----
     devices_by_name: Dict[str, Dict[str, Any]] = {}
@@ -328,37 +376,28 @@ def run_app(backend: HostBackend,
     def _emit_full_device_list():
         with devices_lock:
             gui_devices = list(devices_by_name.values())
-        ui.update_devices_signal.emit(gui_devices)
+        _safe_emit_signal(ui, ui.update_devices_signal, gui_devices)
 
     current_query_text_lock = threading.Lock()
     current_query_text = {"text": ""}
     current_query_id_lock = threading.Lock()
     current_query_id: Dict[str, Optional[str]] = {"id": None}
     inflight_lock = threading.Lock()
-    inflight: Dict[str, Any] = {
-        "qid": None,
-        # When targeting specific devices, we track who we are still waiting on.
-        # If None → broadcast / unknown fanout (we'll schedule after first response).
-        "pending_devices": None,  # Optional[set[str]]
-    }
+    inflight: Dict[str, Any] = {"qid": None}
 
-    # Auto-resend control (driven by QueryWindow toggle).
-    #
-    # Key behavior:
-    # - Never overlaps in-flight queries: the next send is only scheduled after a response arrives.
-    # - Tries to maintain the requested cadence: if a response took longer than `interval_sec`,
-    #   we resend immediately; otherwise we wait the remaining time.
-    # - Duration is counted from the moment the user presses Send (not from when they toggle ON).
+    # Auto-resend: optional wall-clock session from Send (until_ts). Cadence is send-paced: after each
+    # successful send, a timer fires once per interval_sec (not on every MQTT reply), so a fast edge
+    # cannot starve a slower one. Late replies (older query_id) still update the UI.
     _auto_resend = {
         "enabled": False,
         "interval_sec": 5,
         "duration_sec": 0,
-        "started_ts": None,    # when the duration window begins (set on first response)
-        "until_ts": None,      # started_ts + duration_sec, or None for indefinite
-        "last_send_ts": None,  # when we last sent a query (set on Send / each tick)
-        "last_targets": None,  # list[str] used for the run (captured on Send)
+        "until_ts": None,
+        "last_send_ts": None,
+        "last_targets": None,
     }
     _auto_timer = {"t": None}
+    _auto_was_enabled = False
 
     def _on_packet(pkt: Dict[str, Any]) -> None:
         try:
@@ -421,16 +460,14 @@ def run_app(backend: HostBackend,
                 pkt_qid = body.get("query_id") if isinstance(body, dict) else None
                 with current_query_id_lock:
                     active_qid = current_query_id.get("id")
-                if active_qid and pkt_qid and str(pkt_qid) != str(active_qid):
-                    return
+                is_stale = bool(active_qid and pkt_qid and str(pkt_qid) != str(active_qid))
 
                 with current_query_text_lock:
                     qt = current_query_text.get("text", "")
-                ui.process_query_packet_signal.emit(pkt, qt)
+                if not _safe_emit_signal(ui, ui.process_query_packet_signal, pkt, qt, is_stale):
+                    return
 
-                # Enforce duration stop on *every* response.
-                # Without this, multi-device gating (wait-for-all) can delay scheduling and the
-                # duration check might not run, making auto-resend appear to "last longer".
+                # Wall-clock session end (checked on every reply, including late ones).
                 try:
                     if _auto_resend.get("enabled"):
                         until_ts_stop = _auto_resend.get("until_ts")
@@ -442,93 +479,8 @@ def run_app(backend: HostBackend,
                                     tprev.cancel()
                             except Exception:
                                 pass
+                            _safe_emit_signal(ui, ui.auto_resend_session_deadline_signal, None)
                             return
-                except Exception:
-                    pass
-
-                # If the query was targeted to multiple devices, don't auto-resend until all
-                # targeted devices have responded for this query_id; otherwise slower devices
-                # will be "masked" by rapid resends (their later responses have old query_id).
-                src_dev = (header or {}).get("source_device")
-                can_schedule = True
-                try:
-                    with inflight_lock:
-                        pending = inflight.get("pending_devices")
-                        inflight_qid = inflight.get("qid")
-                        if inflight_qid and pkt_qid and str(pkt_qid) == str(inflight_qid) and isinstance(pending, set) and pending:
-                            if isinstance(src_dev, str) and src_dev in pending:
-                                pending.discard(src_dev)
-                            can_schedule = (len(pending) == 0)
-                except Exception:
-                    can_schedule = True
-
-                # Schedule next auto-resend tick (sequential: only after the previous response(s) arrive).
-                try:
-                    if can_schedule and _auto_resend.get("enabled"):
-                        interval = int(_auto_resend.get("interval_sec") or 0)
-                        interval = max(0, interval)
-                        until_ts = _auto_resend.get("until_ts")
-                        now_ts = time.time()
-                        # Duration semantics: start the duration window after the first response arrives
-                        # (so latency doesn't "consume" the requested duration).
-                        if _auto_resend.get("started_ts") is None:
-                            try:
-                                dur0 = int(_auto_resend.get("duration_sec") or 0)
-                            except Exception:
-                                dur0 = 0
-                            if dur0 > 0:
-                                _auto_resend["started_ts"] = now_ts
-                                _auto_resend["until_ts"] = now_ts + float(dur0)
-                                until_ts = _auto_resend.get("until_ts")
-                        if isinstance(until_ts, (int, float)) and now_ts >= float(until_ts):
-                            _auto_resend["enabled"] = False
-                            return
-                        # Cancel previous timer if any.
-                        try:
-                            tprev = _auto_timer.get("t")
-                            if tprev is not None:
-                                tprev.cancel()
-                        except Exception:
-                            pass
-
-                        # Keep cadence: wait the remaining time since the last send.
-                        last_send_ts = _auto_resend.get("last_send_ts")
-                        delay = float(interval)
-                        if isinstance(last_send_ts, (int, float)):
-                            elapsed = max(0.0, now_ts - float(last_send_ts))
-                            delay = max(0.0, float(interval) - elapsed)
-
-                        def _tick():
-                            try:
-                                qw_local = handler._get_query_window()
-                                # If user disabled since scheduling, skip.
-                                if not _auto_resend.get("enabled"):
-                                    return
-                                until_ts2 = _auto_resend.get("until_ts")
-                                now2 = time.time()
-                                if isinstance(until_ts2, (int, float)) and now2 >= float(until_ts2):
-                                    _auto_resend["enabled"] = False
-                                    return
-                                # Re-send using current query text + current targets.
-                                with current_query_text_lock:
-                                    qtxt = current_query_text.get("text", "")
-                                if not qtxt:
-                                    return
-                                # Use the target list captured when the user pressed Send
-                                # (avoid drifting to a single device if UI selection changes).
-                                tgs = _auto_resend.get("last_targets")
-                                if not isinstance(tgs, list):
-                                    tgs = []
-                                _auto_resend["last_send_ts"] = time.time()
-                                on_query_sent(qtxt, target_devices=tgs)
-                                if qw_local and hasattr(qw_local, "set_query_pending"):
-                                    qw_local.set_query_pending(True, f"Auto resend in {interval}s…")
-                            except Exception as e:
-                                print(f"[HOST_MAIN] Auto resend tick failed: {e!r}")
-
-                        _auto_timer["t"] = threading.Timer(max(0.0, float(delay)), _tick)
-                        _auto_timer["t"].daemon = True
-                        _auto_timer["t"].start()
                 except Exception:
                     pass
                 return
@@ -577,14 +529,55 @@ def run_app(backend: HostBackend,
                     })
 
                 print(f"[HOST_MAIN] Updating GUI with {len(gui_devices)} device(s)")
-                ui.update_devices_signal.emit(gui_devices)
+                _safe_emit_signal(ui, ui.update_devices_signal, gui_devices)
 
             except Exception as e:
                 print(f"[HOST_MAIN] Worker exception: {e!r}")
 
         threading.Thread(target=worker, daemon=True).start()
 
-    def on_query_sent(query_text: str, target_devices: Optional[List[str]] = None):
+    def _schedule_auto_resend_after_send() -> None:
+        """Arm one-shot timer for the next auto query: interval_sec after last successful send.
+
+        Not driven by MQTT replies — avoids a fast edge resetting the timer so a slower edge
+        rarely sees a fresh query_id before the next broadcast.
+        """
+        if not _auto_resend.get("enabled"):
+            return
+        now_ts = time.time()
+        until_ts = _auto_resend.get("until_ts")
+        if isinstance(until_ts, (int, float)) and now_ts >= float(until_ts):
+            _auto_resend["enabled"] = False
+            try:
+                tprev = _auto_timer.get("t")
+                if tprev is not None:
+                    tprev.cancel()
+            except Exception:
+                pass
+            _safe_emit_signal(ui, ui.auto_resend_session_deadline_signal, None)
+            return
+        try:
+            tprev = _auto_timer.get("t")
+            if tprev is not None:
+                tprev.cancel()
+        except Exception:
+            pass
+        interval = int(_auto_resend.get("interval_sec") or 5)
+        interval = max(1, interval)
+
+        def _tick() -> None:
+            _safe_emit_signal(ui, ui.auto_resend_due_signal)
+
+        _auto_timer["t"] = threading.Timer(float(interval), _tick)
+        _auto_timer["t"].daemon = True
+        _auto_timer["t"].start()
+
+    def on_query_sent(
+        query_text: str,
+        target_devices: Optional[List[str]] = None,
+        *,
+        anchor_session: bool = True,
+    ):
         query_text = (query_text or "").strip()
         if not query_text:
             print("[HOST_MAIN] Query text empty — ignoring.")
@@ -597,18 +590,28 @@ def run_app(backend: HostBackend,
         with current_query_text_lock:
             current_query_text["text"] = query_text
 
-        # If auto-resend is enabled, capture the targets for the run and reset duration
-        # so it starts after the first response arrives (latency doesn't consume it).
+        # Keep auto-resend fanout aligned with the actual target list on every send while auto is on
+        # (not only the user's first anchor Send), so chip / checkbox changes apply to subsequent ticks.
         if _auto_resend.get("enabled"):
+            _auto_resend["last_targets"] = list(targets)
+
+        # If auto-resend is enabled, anchor session wall clock only on user Send (not each auto tick).
+        if _auto_resend.get("enabled") and anchor_session:
             try:
                 _auto_resend["duration_sec"] = int(_auto_resend.get("duration_sec") or 0)
             except Exception:
                 _auto_resend["duration_sec"] = 0
             started = time.time()
-            _auto_resend["started_ts"] = None
-            _auto_resend["until_ts"] = None
-            _auto_resend["last_send_ts"] = started
-            _auto_resend["last_targets"] = list(targets)
+            dur = int(_auto_resend.get("duration_sec") or 0)
+            if dur > 0:
+                _auto_resend["until_ts"] = started + float(dur)
+            else:
+                _auto_resend["until_ts"] = None
+            _safe_emit_signal(
+                ui,
+                ui.auto_resend_session_deadline_signal,
+                _auto_resend.get("until_ts"),
+            )
 
         try:
             qw = handler._get_query_window()
@@ -616,7 +619,7 @@ def run_app(backend: HostBackend,
                 pending_msg = (
                     f"Pending response from {targets[0]}…" if len(targets) == 1
                     else f"Pending response from {len(targets)} devices…" if targets
-                    else "Pending response..."
+                    else "Pending response (broadcast)…"
                 )
                 qw.set_query_pending(True, pending_msg)
         except Exception:
@@ -626,13 +629,12 @@ def run_app(backend: HostBackend,
             qid = backend.send_query_request(query_text, target_devices=targets)
             with current_query_id_lock:
                 current_query_id["id"] = qid
-            # Track fanout for auto-resend gating.
             try:
                 with inflight_lock:
                     inflight["qid"] = qid
-                    inflight["pending_devices"] = set(targets) if targets else None
             except Exception:
                 pass
+            _auto_resend["last_send_ts"] = time.time()
             try:
                 qw = handler._get_query_window()
                 if qw and hasattr(qw, "set_last_query_id"):
@@ -640,6 +642,8 @@ def run_app(backend: HostBackend,
             except Exception:
                 pass
             print(f"[HOST_MAIN] Query request sent (query_id={qid}, targets={targets_str})")
+            if _auto_resend.get("enabled"):
+                _schedule_auto_resend_after_send()
         except Exception as e:
             print(f"[HOST_MAIN] Failed to send query_request: {e!r}")
             try:
@@ -649,32 +653,81 @@ def run_app(backend: HostBackend,
             except Exception:
                 pass
 
+    def _do_automated_resend_on_main_thread() -> None:
+        """Runs on the Qt main thread (invoked via auto_resend_due_signal from the timer thread)."""
+        try:
+            if not _auto_resend.get("enabled"):
+                return
+            until_ts2 = _auto_resend.get("until_ts")
+            now2 = time.time()
+            if isinstance(until_ts2, (int, float)) and now2 >= float(until_ts2):
+                _auto_resend["enabled"] = False
+                _safe_emit_signal(ui, ui.auto_resend_session_deadline_signal, None)
+                return
+            with current_query_text_lock:
+                qtxt = current_query_text.get("text", "")
+            if not qtxt:
+                return
+            tgs: list[str] = []
+            qw = handler._get_query_window()
+            if qw and hasattr(qw, "target_devices"):
+                try:
+                    tgs = list(qw.target_devices())
+                except Exception:
+                    tgs = []
+            on_query_sent(qtxt, target_devices=tgs, anchor_session=False)
+        except Exception as e:
+            print(f"[HOST_MAIN] Auto resend tick failed: {e!r}")
+
+    ui.auto_resend_due_signal.connect(_do_automated_resend_on_main_thread)
+
     def on_auto_resend_changed(enabled: bool, interval_sec: int, duration_sec: int) -> None:
+        nonlocal _auto_was_enabled
+        was_enabled = _auto_was_enabled
         _auto_resend["enabled"] = bool(enabled)
         try:
-            _auto_resend["interval_sec"] = int(interval_sec)
+            _auto_resend["interval_sec"] = max(1, int(interval_sec))
         except Exception:
             _auto_resend["interval_sec"] = 5
         try:
             _auto_resend["duration_sec"] = int(duration_sec)
         except Exception:
             _auto_resend["duration_sec"] = 0
-        # Duration window begins on the next Send (not immediately on toggle).
+        # Duration window is applied on the next Send.
         if not _auto_resend["enabled"]:
-            _auto_resend["started_ts"] = None
             _auto_resend["until_ts"] = None
-            _auto_resend["last_send_ts"] = None
             _auto_resend["last_targets"] = None
-        # Cancel any pending timer when turned off.
-        if not _auto_resend["enabled"]:
+            _auto_resend["last_send_ts"] = None
+            _auto_was_enabled = False
+            # Cancel any pending timer when turned off.
             try:
                 tprev = _auto_timer.get("t")
                 if tprev is not None:
                     tprev.cancel()
             except Exception:
                 pass
+            _safe_emit_signal(ui, ui.auto_resend_session_deadline_signal, None)
+            return
+
+        _auto_was_enabled = True
+        # First transition to ON: arm cadence if there is already query text (no extra Send needed).
+        if not was_enabled:
+            try:
+                with current_query_text_lock:
+                    has_txt = bool((current_query_text.get("text") or "").strip())
+                if has_txt:
+                    _schedule_auto_resend_after_send()
+            except Exception:
+                pass
 
     handler.set_network_callbacks(on_discover=on_discover_clicked, on_query=on_query_sent)
+
+    def _forward_auto_resend_session_deadline(ts: object) -> None:
+        qw = handler._get_query_window()
+        if qw and hasattr(qw, "set_auto_resend_session_deadline"):
+            qw.set_auto_resend_session_deadline(ts if isinstance(ts, (int, float)) else None)
+
+    ui.auto_resend_session_deadline_signal.connect(_forward_auto_resend_session_deadline)
     # Wire QueryWindow auto-resend toggle (if present).
     try:
         if hasattr(devices_window, "set_auto_resend_changed_callback"):
