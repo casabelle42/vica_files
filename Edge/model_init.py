@@ -228,12 +228,12 @@ def sys_metrics() -> Dict[str, Any]:
 # ========= Model service =========
 
 class ModelService:
-        def get_available_models(self):
-            # For now, return a list with the current model id
-            return [CFG.MODEL_ID]
+    def get_available_models(self):
+        # For now, return a list with the current model id
+        return [CFG.MODEL_ID]
 
-        def get_active_model(self):
-            return CFG.MODEL_ID
+    def get_active_model(self):
+        return CFG.MODEL_ID
     """
     Manages the VLM container and model lifecycle.
     Accepts inference requests from handler.py and returns results via callback.
