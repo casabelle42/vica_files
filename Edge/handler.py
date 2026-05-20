@@ -342,7 +342,25 @@ class EdgeHandler:
             if not query_text:
                 self.logger.warning("Query request missing query text.")
                 return None
-            
+
+            targets: list[str] = []
+            td = body.get("target_devices")
+            if isinstance(td, list):
+                targets = [str(t).strip() for t in td if isinstance(t, str) and str(t).strip()]
+            ts = body.get("target_device")
+            if isinstance(ts, str) and ts.strip() and not targets:
+                targets = [ts.strip()]
+            if targets:
+                me = (os.environ.get("VICA_DEVICE_NAME") or "").strip() or platform.node()
+                want = {t.casefold() for t in targets}
+                if me.casefold() not in want:
+                    self.logger.info(
+                        f"Skipping query_request (query_id={query_id}): "
+                        f"target_devices={targets!r} this_device={me!r} "
+                        f"(set VICA_DEVICE_NAME to match host discovery name if needed)"
+                    )
+                    return None
+
             if not self._ready or not self.model_service:
                 self.logger.warning("Model service not ready yet. Cannot process query.")
                 return None

@@ -152,21 +152,26 @@ class MQTTHostClient:
         model: str | None = None,
     ):
         query_id = str(query_id or uuid.uuid4())
-        # Normalise targets.
+        # Normalise targets for logging / UI / MQTT body (broadcast when omitted).
         targets = [t for t in (target_devices or []) if isinstance(t, str) and t.strip()]
         target_device = str(target_device).strip() if isinstance(target_device, str) else ""
         if not target_device and len(targets) == 1:
             target_device = targets[0]
 
+        body: dict = {
+            "query_id": query_id,
+            "query": str(query or ""),
+            **({"model": str(model).strip()} if isinstance(model, str) and str(model).strip() else {}),
+        }
+        # Non-empty targeting on the wire so edges can filter; omit for broadcast.
+        if targets:
+            body["target_devices"] = targets
+        elif target_device:
+            body["target_device"] = target_device
+
         pkt = {
             "header": self._make_header("query_request"),
-            "body": {
-                "query_id": query_id,
-                "query": str(query or ""),
-                **({"target_device": target_device} if target_device else {}),
-                **({"target_devices": targets} if targets else {}),
-                **({"model": str(model).strip()} if isinstance(model, str) and str(model).strip() else {}),
-            },
+            "body": body,
         }
         self.outgoing_queue.put(("host/control", pkt))
         print(f"[MQTTHostClient] Queued query_request id={query_id}")
