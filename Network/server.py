@@ -95,6 +95,21 @@ def on_message(client, userdata, msg):
             print("[NUC] Host discovery → sent discovery_response")
             return
 
+        # Device-specific routing for query_request based on target_devices
+        if isinstance(pkt, dict) and pkt.get("header", {}).get("message_type") == "query_request":
+            targets = pkt.get("body", {}).get("target_devices", [])
+            model = pkt.get("body", {}).get("model")
+            if targets:
+                # Route only to specified devices
+                for device_name in targets:
+                    device_topic = f"edge/{device_name}/control"
+                    client.publish(device_topic, msg.payload)
+                    print(f"[NUC] Query routed to {device_name} (model: {model})")
+                return
+            # No targets specified, broadcast to all edges
+            print("[NUC] Query broadcast to all edges (no target_devices specified)")
+
+        # All other messages from host to edge (via broadcast topic)
         client.publish(SERVER_TO_EDGE, msg.payload)
         if VERBOSE:
             print("[NUC] Host → Edge forwarded")

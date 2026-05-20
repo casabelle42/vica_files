@@ -19,6 +19,9 @@ class MQTTEdgeClient:
         # Thread-safe queue for outgoing messages from handler
         self.outgoing_queue = queue.Queue()
 
+        # Device name for topic subscription (use hostname by default)
+        self.device_name = os.environ.get("VICA_EDGE_NAME", os.environ.get("HOSTNAME", os.environ.get("COMPUTERNAME", "EdgeDevice")))
+
         # Instantiate the handler
         self.edge_handler = EdgeHandler(on_update_callback=self._on_handler_update)
 
@@ -47,8 +50,13 @@ class MQTTEdgeClient:
     def _on_mqtt_connect(self, client, userdata, flags, rc):
         if rc == 0:
             print(f"[MQTTEdgeClient] ✅ Connected to broker {self.mqtt_broker}:{self.mqtt_port}")
+            # Subscribe to device-specific topic for targeted queries
+            device_topic = f"edge/{self.device_name}/control"
+            client.subscribe(device_topic)
+            print(f"[MQTTEdgeClient] Subscribed to topic '{device_topic}'")
+            # Subscribe to broadcast topic for non-targeted messages
             client.subscribe("edge/control")
-            print("[MQTTEdgeClient] Subscribed to topic 'edge/control'")
+            print("[MQTTEdgeClient] Subscribed to topic 'edge/control' (fallback)")
         else:
             print(f"[MQTTEdgeClient] ❌ Connection failed with code {rc}")
 

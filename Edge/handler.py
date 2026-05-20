@@ -241,14 +241,22 @@ class EdgeHandler:
                         container_status_str = "running"
                         current_operation = "idle"
 
-                    # Create device_status packet
+                    # Create device_status packet (add available_models, active_model)
+                    available_models = []
+                    active_model = None
+                    if self.model_service and hasattr(self.model_service, "get_available_models"):
+                        available_models = self.model_service.get_available_models()
+                    if self.model_service and hasattr(self.model_service, "get_active_model"):
+                        active_model = self.model_service.get_active_model()
                     device_status_body = {
                         "name": platform.node(),
                         "cpu": round(cpu_percent, 2),
                         "ram": round(ram_percent, 2),
                         "gpu": 0.0,  # GPU metrics not available via psutil
                         "network_strength": -60,  # Placeholder
-                        "isProcessing": (self.model_service and not self.model_service.paused) if self.model_service else False
+                        "isProcessing": (self.model_service and not self.model_service.paused) if self.model_service else False,
+                        "available_models": available_models,
+                        "active_model": active_model
                     }
                     device_status_packet = self._create_packet("device_status", device_status_body)
 
@@ -402,9 +410,12 @@ class EdgeHandler:
                         image_width = 640  # Placeholder
                         image_height = 480  # Placeholder
 
-                    # Create query_response packet (chunked)
+                    # Create query_response packet (chunked, add status/model_used/error)
                     query_response_body = {
                         "query_id": query_id,
+                        "status": "success",
+                        "model_used": getattr(self.model_service, "get_active_model", lambda: None)(),
+                        "error": None,
                         "answer": results_text,
                         "metadata": {
                             "image_width": image_width,

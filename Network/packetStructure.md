@@ -4,6 +4,8 @@
 
 This document defines the JSON packet structures for all messages exchanged between **Host devices**, **Edge devices**, and the **MQTT broker**. All packets follow a shared header structure to ensure consistency.
 
+**Note:** Host and Edge devices never communicate directly. All communication flows through the Server relay for routing and model selection purposes.
+
 ---
 
 ## 0. Common Packet Structure
@@ -38,7 +40,9 @@ All packets must follow this top-level JSON format:
   },
   "body": {
     "query_id": "<uuid>",
-    "query": "<natural_language_query>"
+    "query": "<natural_language_query>",
+    "target_devices": ["<edge_name>"],
+    "model": "<selected_model_name>"
   }
 }
 ```
@@ -77,7 +81,9 @@ All packets must follow this top-level JSON format:
     "ram": 0.0,
     "gpu": 0.0,
     "network_strength": -60,
-    "isProcessing": true
+    "isProcessing": true,
+    "available_models": ["<model_name>"],
+    "active_model": "<selected_model_name>"
   }
 }
 ```
@@ -110,6 +116,9 @@ All packets must follow this top-level JSON format:
     },
     "body": {
         "query_id": "<uuid>",
+        "status": "success | error",
+        "model_used": "<model_name>",
+        "error": null,
         "metadata": {
             "image_width": 0,
             "image_height": 0,
@@ -179,7 +188,9 @@ All packets must follow this top-level JSON format:
   },
   "body": {
     "query_id": "<uuid>",
-    "query": "<natural_language_query>"
+    "query": "<natural_language_query>",
+    "target_devices": ["<edge_name>"],
+    "model": "<selected_model_name>"
   }
 }
 ```
@@ -240,7 +251,9 @@ All packets must follow this top-level JSON format:
     "ram": 0.0,
     "gpu": 0.0,
     "network_strength": -60,
-    "isProcessing": true
+    "isProcessing": true,
+    "available_models": ["<model_name>"],
+    "active_model": "<selected_model_name>"
   }
 }
 ```
@@ -255,6 +268,9 @@ All packets must follow this top-level JSON format:
     },
     "body": {
         "query_id": "<uuid>",
+        "status": "success | error",
+        "model_used": "<model_name>",
+        "error": null,
         "metadata": {
             "image_width": 0,
             "image_height": 0,
@@ -331,7 +347,9 @@ All packets must follow this top-level JSON format:
         "ram": 0.0,
         "gpu": 0.0,
         "network_strength": -60,
-        "isProcessing": false
+        "isProcessing": false,
+        "available_models": ["<model_name>"],
+        "active_model": "<selected_model_name>"
       }
     ]
   }
