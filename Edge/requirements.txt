@@ -1,0 +1,20 @@
+# Edge device — MQTT client, handler, VLM inference (client.py, handler.py, model_init.py)
+# Install: pip install -r requirements.txt
+#
+# Jetson note: PyTorch is often pre-installed via conda/jetson-containers.
+# If torch install fails, skip it and use your existing torch, then install the rest.
+
+# MQTT
+paho-mqtt>=2.0.0
+
+# System / video
+psutil>=5.9.0
+opencv-python>=4.8.0
+numpy>=1.24.0
+pillow>=10.0.0
+
+# VLM (model_init.py) — needs ImageTextToText (4.45+) or legacy Vision2Seq
+transformers>=4.45.0
+torch>=2.0.0
+
+# Optional env on edge (not pip): VICA_DEVICE_NAME, VICA_EDGE_NAME, VICA_INFERENCE_TIMEOUT_SEC (default 60)

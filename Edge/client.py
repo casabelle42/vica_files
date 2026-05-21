@@ -3,7 +3,7 @@ import queue
 import time
 import os
 import paho.mqtt.client as mqtt
-from handler import EdgeHandler  # Make sure your handler is in the same directory
+from handler import EdgeHandler, edge_device_name
 
 class MQTTEdgeClient:
     """
@@ -19,8 +19,8 @@ class MQTTEdgeClient:
         # Thread-safe queue for outgoing messages from handler
         self.outgoing_queue = queue.Queue()
 
-        # Device name for topic subscription (use hostname by default)
-        self.device_name = os.environ.get("VICA_EDGE_NAME", os.environ.get("HOSTNAME", os.environ.get("COMPUTERNAME", "EdgeDevice")))
+        # Must match discovery name and handler targeted-query filter.
+        self.device_name = edge_device_name()
 
         # Instantiate the handler
         self.edge_handler = EdgeHandler(on_update_callback=self._on_handler_update)
@@ -50,13 +50,14 @@ class MQTTEdgeClient:
     def _on_mqtt_connect(self, client, userdata, flags, rc):
         if rc == 0:
             print(f"[MQTTEdgeClient] ✅ Connected to broker {self.mqtt_broker}:{self.mqtt_port}")
-            # Subscribe to device-specific topic for targeted queries
+            print(f"[MQTTEdgeClient] Device identity for targeting: {self.device_name!r}")
+            # Subscribe to device-specific topic for targeted queries (NUC routes here)
             device_topic = f"edge/{self.device_name}/control"
             client.subscribe(device_topic)
             print(f"[MQTTEdgeClient] Subscribed to topic '{device_topic}'")
-            # Subscribe to broadcast topic for non-targeted messages
+            # Subscribe to broadcast topic when host sends without target_devices
             client.subscribe("edge/control")
-            print("[MQTTEdgeClient] Subscribed to topic 'edge/control' (fallback)")
+            print("[MQTTEdgeClient] Subscribed to topic 'edge/control' (broadcast)")
         else:
             print(f"[MQTTEdgeClient] ❌ Connection failed with code {rc}")
 
@@ -114,5 +115,6 @@ if __name__ == "__main__":
     # Default to the NUC broker; allow override via env var.
     MQTT_BROKER_IP = os.environ.get("VICA_MQTT_BROKER", "10.148.0.95")
     MQTT_BROKER_PORT = int(os.environ.get("VICA_MQTT_PORT", "1883"))
+    print(f"[MQTTEdgeClient] Device identity: {edge_device_name()!r} (MQTT topic edge/<name>/control)")
     client = MQTTEdgeClient(mqtt_broker=MQTT_BROKER_IP, mqtt_port=MQTT_BROKER_PORT)
     client.start()

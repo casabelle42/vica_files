@@ -174,7 +174,10 @@ class MQTTHostClient:
             "body": body,
         }
         self.outgoing_queue.put(("host/control", pkt))
-        print(f"[MQTTHostClient] Queued query_request id={query_id}")
+        print(
+            f"[MQTTHostClient] Queued query_request id={query_id} "
+            f"targets={targets!r} topic=host/control"
+        )
         return query_id
 
     def send_cancel_query_request(self, query_id: str):

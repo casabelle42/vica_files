@@ -10,6 +10,23 @@ from datetime import datetime
 import platform
 from model_init import ModelService, CFG
 
+
+def edge_device_name() -> str:
+    """Single identity for discovery, MQTT topic, and targeted-query filter."""
+    for key in ("VICA_DEVICE_NAME", "VICA_EDGE_NAME", "HOSTNAME"):
+        v = (os.environ.get(key) or "").strip()
+        if v:
+            return v
+    return platform.node()
+
+
+def inference_timeout_sec() -> float:
+    try:
+        return max(5.0, float(os.getenv("VICA_INFERENCE_TIMEOUT_SEC", "60")))
+    except (TypeError, ValueError):
+        return 60.0
+
+
 class EdgeHandler:
     """
     Proxy between the networking layer (client.py) and the inference layer (model_init.py).
@@ -61,11 +78,28 @@ class EdgeHandler:
         return {
             "header": {
                 "timestamp": datetime.now().isoformat(),
-                "source_device": platform.node(),
+                "source_device": edge_device_name(),
                 "message_type": message_type
             },
             "body": body
         }
+
+    def _emit_query_response(self, query_id: str, answer: str, *, status: str = "error") -> None:
+        """Always reply so the host does not sit until GUI timeout."""
+        body = {
+            "query_id": query_id,
+            "status": status,
+            "answer": answer,
+            "metadata": {},
+            "frame": {
+                "frame_id": 0,
+                "timestamp": datetime.now().isoformat(),
+                "detections": [{"label": status, "confidence": 0.0, "dets": [answer]}],
+            },
+        }
+        pkt = self._create_packet("query_response", body)
+        if self.on_update_callback:
+            self.on_update_callback("query_response", pkt)
 
     def _parse_incoming_packet(self, packet_str: str):
         """
@@ -249,7 +283,7 @@ class EdgeHandler:
                     if self.model_service and hasattr(self.model_service, "get_active_model"):
                         active_model = self.model_service.get_active_model()
                     device_status_body = {
-                        "name": platform.node(),
+                        "name": edge_device_name(),
                         "cpu": round(cpu_percent, 2),
                         "ram": round(ram_percent, 2),
                         "gpu": 0.0,  # GPU metrics not available via psutil
@@ -359,18 +393,21 @@ class EdgeHandler:
             if isinstance(ts, str) and ts.strip() and not targets:
                 targets = [ts.strip()]
             if targets:
-                me = (os.environ.get("VICA_DEVICE_NAME") or "").strip() or platform.node()
+                me = edge_device_name()
                 want = {t.casefold() for t in targets}
                 if me.casefold() not in want:
                     self.logger.info(
                         f"Skipping query_request (query_id={query_id}): "
-                        f"target_devices={targets!r} this_device={me!r} "
-                        f"(set VICA_DEVICE_NAME to match host discovery name if needed)"
+                        f"target_devices={targets!r} this_device={me!r}"
                     )
                     return None
 
             if not self._ready or not self.model_service:
                 self.logger.warning("Model service not ready yet. Cannot process query.")
+                self._emit_query_response(
+                    query_id,
+                    "Edge model not ready yet (container still starting). Retry in a few seconds.",
+                )
                 return None
 
             self.logger.info(f"Processing query_request (query_id={query_id}): {query_text}")
@@ -381,7 +418,7 @@ class EdgeHandler:
                 result_list = self.model_service.run_inference_many(
                     query_text,
                     num_frames=getattr(CFG, "RETURN_FRAMES", 1),
-                    timeout_sec=2.0,
+                    timeout_sec=inference_timeout_sec(),
                 )
 
                 if not isinstance(result_list, list) or len(result_list) == 0:

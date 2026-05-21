@@ -293,8 +293,9 @@ class UiDispatcher(QObject):
                 "time_processed": str(header.get("timestamp") or datetime.now().isoformat())[:19],
             }
 
-            if image_b64 and hasattr(qw, "add_returned_image"):
-                qw.add_returned_image(image_b64, metadata=gui_metadata)
+            has_answer = bool(answer_text or det_labels)
+            if hasattr(qw, "add_returned_image") and (image_b64 or has_answer):
+                qw.add_returned_image(image_b64 or "", metadata=gui_metadata)
             if hasattr(qw, "update_metadata"):
                 qw.update_metadata(gui_metadata)
             if hasattr(qw, "set_query_pending") and not is_stale:

@@ -36,6 +36,21 @@ def safe_json(payload: bytes):
         return None
 
 
+def normalize_target_devices(body) -> list[str]:
+    """Return a list of edge device names from query_request body."""
+    if not isinstance(body, dict):
+        return []
+    td = body.get("target_devices")
+    if isinstance(td, str) and td.strip():
+        return [td.strip()]
+    if isinstance(td, list):
+        return [str(t).strip() for t in td if isinstance(t, str) and str(t).strip()]
+    ts = body.get("target_device")
+    if isinstance(ts, str) and ts.strip():
+        return [ts.strip()]
+    return []
+
+
 def make_discovery_response(server_name: str = "NUC"):
     # Build the list in the format your Host expects
     devices = []
@@ -97,17 +112,23 @@ def on_message(client, userdata, msg):
 
         # Device-specific routing for query_request based on target_devices
         if isinstance(pkt, dict) and pkt.get("header", {}).get("message_type") == "query_request":
-            targets = pkt.get("body", {}).get("target_devices", [])
-            model = pkt.get("body", {}).get("model")
+            body = pkt.get("body", {}) if isinstance(pkt.get("body"), dict) else {}
+            targets = normalize_target_devices(body)
+            qid = body.get("query_id", "?")
+            model = body.get("model")
             if targets:
-                # Route only to specified devices
                 for device_name in targets:
                     device_topic = f"edge/{device_name}/control"
                     client.publish(device_topic, msg.payload)
-                    print(f"[NUC] Query routed to {device_name} (model: {model})")
+                    print(
+                        f"[NUC] Query routed → {device_topic} "
+                        f"(query_id={qid}, model={model})"
+                    )
                 return
-            # No targets specified, broadcast to all edges
-            print("[NUC] Query broadcast to all edges (no target_devices specified)")
+            print(
+                f"[NUC] Query broadcast → {SERVER_TO_EDGE} "
+                f"(query_id={qid}, no target_devices in body)"
+            )
 
         # All other messages from host to edge (via broadcast topic)
         client.publish(SERVER_TO_EDGE, msg.payload)

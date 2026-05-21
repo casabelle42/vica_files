@@ -605,8 +605,11 @@ class MainWindow(QMainWindow):
         self._session_deadline_timer = QTimer(self)
         self._session_deadline_timer.setInterval(250)
         self._session_deadline_timer.timeout.connect(self._tick_session_deadline)
-        # #16 Query timeout warning.
-        self._query_timeout_ms = 20_000
+        # #16 Query timeout warning (VLM on Jetson often needs >20s).
+        try:
+            self._query_timeout_ms = max(20_000, int(os.getenv("VICA_QUERY_TIMEOUT_MS", "120000")))
+        except (TypeError, ValueError):
+            self._query_timeout_ms = 120_000
         self._timeout_timer = QTimer(self)
         self._timeout_timer.setSingleShot(True)
         self._timeout_timer.timeout.connect(self._on_query_timeout)
@@ -1250,6 +1253,12 @@ class MainWindow(QMainWindow):
                 Qt.AspectRatioMode.KeepAspectRatio,
                 Qt.TransformationMode.SmoothTransformation,
             ))
+        else:
+            summary = str((metadata or {}).get("response", "") or "").strip()
+            if len(summary) > 90:
+                summary = summary[:87] + "..."
+            img_lbl.setWordWrap(True)
+            img_lbl.setText(summary or "No image")
         row = self._grid_count // self._grid_columns
         col = self._grid_count % self._grid_columns
         image_index = self._grid_count
@@ -1290,6 +1299,8 @@ class MainWindow(QMainWindow):
         px = item.get("pixmap")
         if isinstance(px, QPixmap) and not px.isNull():
             self._current_pixmap = px
+            self.image_label.setText("")
+            self.image_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
             preview = px.scaled(
                 self.image_label.width() or 400,
                 self.image_label.height() or 300,
@@ -1299,6 +1310,16 @@ class MainWindow(QMainWindow):
             self.image_label.setPixmap(preview)
         else:
             self._current_pixmap = None
+            self.image_label.setPixmap(QPixmap())
+            response = str((item.get("metadata") or {}).get("response", "") or "").strip()
+            if response:
+                self.image_label.setWordWrap(True)
+                self.image_label.setAlignment(
+                    Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft
+                )
+                self.image_label.setText(response)
+            else:
+                self.image_label.clear()
 
         metadata = item.get("metadata", {})
         if isinstance(metadata, dict):

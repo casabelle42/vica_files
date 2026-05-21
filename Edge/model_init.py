@@ -16,7 +16,12 @@ import psutil
 import cv2
 import torch
 from PIL import Image
-from transformers import AutoProcessor, AutoModelForVision2Seq
+from transformers import AutoProcessor
+
+try:
+    from transformers import AutoModelForImageTextToText as _AutoVLMModel
+except ImportError:
+    from transformers import AutoModelForVision2Seq as _AutoVLMModel
 
 # ========= Configuration =========
 
@@ -38,7 +43,7 @@ class Config:
     # Container/Model
     CONTAINER_NAME: str = os.getenv("CONTAINER_NAME", "nano-vlm")
     DOCKER_IMAGE: str = os.getenv("DOCKER_IMAGE", "yourrepo/nano-vlm:jetson")
-    AUTO_START_CONTAINER: bool = os.getenv("AUTO_START_CONTAINER", "1") == "1"
+    AUTO_START_CONTAINER: bool = os.getenv("AUTO_START_CONTAINER", "0") == "1"
     # Identity
     MACHINE_NAME: str = os.getenv("MACHINE_NAME", platform.node())
 
@@ -100,7 +105,7 @@ class NanoVLM:
     def load(self):
         # Load once; keep resident for subsequent queries.
         self.processor = AutoProcessor.from_pretrained(CFG.MODEL_ID, trust_remote_code=True)
-        self.model = AutoModelForVision2Seq.from_pretrained(
+        self.model = _AutoVLMModel.from_pretrained(
             CFG.MODEL_ID,
             device_map="auto",
             torch_dtype="auto",
@@ -228,12 +233,6 @@ def sys_metrics() -> Dict[str, Any]:
 # ========= Model service =========
 
 class ModelService:
-        def get_available_models(self):
-            # For now, return a list with the current model id
-            return [CFG.MODEL_ID]
-
-        def get_active_model(self):
-            return CFG.MODEL_ID
     """
     Manages the VLM container and model lifecycle.
     Accepts inference requests from handler.py and returns results via callback.
@@ -294,6 +293,12 @@ class ModelService:
     def shutdown(self):
         """Stop the camera. Container and model weights stay loaded by design."""
         self.cam_worker.stop()
+
+    def get_available_models(self):
+        return [CFG.MODEL_ID]
+
+    def get_active_model(self):
+        return CFG.MODEL_ID
 
     # -------------------------
     # Inference
