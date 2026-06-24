@@ -12,6 +12,7 @@ import json
 import os
 import time
 import paho.mqtt.client as mqtt
+from paho.mqtt.client import CallbackAPIVersion
 
 BROKER = "localhost"
 PORT = 1883
@@ -80,14 +81,16 @@ def make_discovery_response(server_name: str = "NUC"):
     }
 
 
-def on_connect(client, userdata, flags, rc):
-    print("[NUC] Connected to broker")
+def on_connect(client, userdata, flags, reason_code, properties):
+    print(f"[NUC] Connected to broker (reason_code={reason_code})")
     result = client.subscribe([
         (HOST_TO_SERVER, 0),
         (EDGE_TO_SERVER, 0),
         (EDGE_STATUS, 0),   
     ])
     print(f"[NUC] Subscribe result: {result}")
+    if VERBOSE:
+        print(f"[NUC] on_connect flags={flags} properties={properties}")
 
 def on_message(client, userdata, msg):
     # 1) Host -> NUC
@@ -156,7 +159,10 @@ def on_message(client, userdata, msg):
 
 
 def main():
-    client = mqtt.Client(client_id="vica-nuc-relay")
+    client = mqtt.Client(
+        callback_api_version=CallbackAPIVersion.VERSION2,
+        client_id="vica-nuc-relay",
+    )
     client.on_connect = on_connect
     client.on_message = on_message
 
