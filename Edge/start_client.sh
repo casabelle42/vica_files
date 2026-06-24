@@ -8,7 +8,7 @@ ROOT="$(cd "$(dirname "$0")" && pwd)"
 
 export VICA_DEVICE_NAME="${VICA_DEVICE_NAME:-$(hostname)}"
 export VICA_EDGE_NAME="${VICA_EDGE_NAME:-$VICA_DEVICE_NAME}"
-export VICA_MQTT_BROKER="${VICA_MQTT_BROKER:-10.148.0.95}"
+export VICA_MQTT_BROKER="${VICA_MQTT_BROKER:-10.148.1.64}"
 export AUTO_START_CONTAINER="${AUTO_START_CONTAINER:-0}"
 
 if [ -f "$HOME/cosmos/bin/activate" ]; then
