@@ -1,4 +1,4 @@
-from typing import Callable, Optional, List
+from typing import Callable, Optional, List, Dict, Tuple
 from pathlib import Path
 import os
 import sys
@@ -6,13 +6,14 @@ import math
 import time
 import base64
 
-from PyQt6.QtCore import Qt, QRectF, QPointF, QTimer, pyqtSignal, QObject
+from PyQt6.QtCore import Qt, QPoint, QRectF, QPointF, QTimer, pyqtSignal, QObject, QEvent
 from PyQt6.QtGui import (
     QColor, QLinearGradient, QPainter, QPainterPath, QPen,
-    QRadialGradient, QFont, QPixmap, QBrush, QIcon,
+    QRadialGradient, QFont, QPixmap, QBrush, QIcon, QWheelEvent,
 )
 from PyQt6.QtWidgets import (
     QApplication,
+    QComboBox,
     QFileDialog,
     QFrame,
     QGraphicsDropShadowEffect,
@@ -26,6 +27,7 @@ from PyQt6.QtWidgets import (
     QPushButton,
     QSpinBox,
     QTextEdit,
+    QLayout,
     QScrollArea,
     QSizePolicy,
     QToolButton,
@@ -36,6 +38,8 @@ from PyQt6.QtWidgets import (
 # ── constants ─────────────────────────────────────────────────────────────────
 WIN_W, WIN_H  = 1100, 760
 BRAND_BG      = "#1D2BA1"
+# Vertical gap between major blocks inside the Query card (title, targets, chips, …).
+_QUERY_SECTION_GAP = 6
 _CARD_DARK    = (0x13, 0x1A, 0x5C)
 _CARD_LIGHT   = (0xB8, 0xDD, 0xFF)
 
@@ -164,17 +168,41 @@ class PillButton(QPushButton):
         p.drawText(rect, Qt.AlignmentFlag.AlignCenter, self.text())
 
 
+_CHIP_COMBO_STYLE = (
+    "QComboBox {"
+    "  background-color: rgba(19,26,92,0.35);"
+    "  border: 1px solid rgba(184,221,255,0.40);"
+    "  border-radius: 8px;"
+    "  padding: 2px 6px;"
+    "  color: #FFFFFF;"
+    "  min-height: 22px;"
+    "}"
+    "QComboBox::drop-down { border: none; width: 14px; }"
+    "QComboBox QAbstractItemView {"
+    "  background-color: #FFFFFF;"
+    "  color: #131A5C;"
+    "  selection-background-color: rgba(29,43,161,0.18);"
+    "}"
+)
+
+
 # ── _TargetChip ───────────────────────────────────────────────────────────────
 class _TargetChip(QFrame):
     """
-    Small pill-shaped widget displaying a selected target device name with an
-    "x" affordance to remove it. Emits ``removed`` (signal) so the parent can
-    update its target list.
+    Target pill: device name, per-edge model dropdown, and remove control.
     """
 
     removed = pyqtSignal(str)
+    model_changed = pyqtSignal(str, str)
 
-    def __init__(self, name: str, parent: Optional[QWidget] = None) -> None:
+    def __init__(
+        self,
+        name: str,
+        *,
+        model: str = "default",
+        available_models: Optional[List[str]] = None,
+        parent: Optional[QWidget] = None,
+    ) -> None:
         super().__init__(parent)
         self._name = name
         self.setObjectName("TargetChip")
@@ -186,7 +214,7 @@ class _TargetChip(QFrame):
             "}"
         )
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(10, 2, 4, 2)
+        layout.setContentsMargins(10, 3, 4, 3)
         layout.setSpacing(6)
 
         lbl = QLabel(name)
@@ -195,6 +223,29 @@ class _TargetChip(QFrame):
         lbl.setFont(f)
         lbl.setStyleSheet("color: #FFFFFF; background: transparent; border: none;")
         layout.addWidget(lbl)
+
+        models_list = [str(m) for m in (available_models or []) if str(m).strip()]
+        if not models_list:
+            models_list = ["default"]
+        current = str(model or "default").strip() or "default"
+        if current not in models_list:
+            models_list = [current] + models_list
+
+        self.model_combo = QComboBox()
+        self.model_combo.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.model_combo.setFont(QFont("Segoe UI", 8))
+        self.model_combo.setMinimumWidth(120)
+        self.model_combo.setMaximumWidth(200)
+        self.model_combo.setToolTip(f"Model for {name}")
+        self.model_combo.setStyleSheet(_CHIP_COMBO_STYLE)
+        self.model_combo.addItems(models_list)
+        self.model_combo.blockSignals(True)
+        self.model_combo.setCurrentText(current if current in models_list else models_list[0])
+        self.model_combo.blockSignals(False)
+        self.model_combo.currentTextChanged.connect(
+            lambda text, n=name: self.model_changed.emit(n, str(text or "default"))
+        )
+        layout.addWidget(self.model_combo)
 
         close_btn = QPushButton("×")
         close_btn.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -210,6 +261,29 @@ class _TargetChip(QFrame):
         close_btn.setToolTip(f"Remove '{name}' from targets")
         close_btn.clicked.connect(lambda: self.removed.emit(self._name))
         layout.addWidget(close_btn)
+
+    def set_model(self, model: str) -> None:
+        model = str(model or "default").strip() or "default"
+        if self.model_combo.currentText() == model:
+            return
+        self.model_combo.blockSignals(True)
+        if self.model_combo.findText(model) < 0:
+            self.model_combo.insertItem(0, model)
+        self.model_combo.setCurrentText(model)
+        self.model_combo.blockSignals(False)
+
+    def set_available_models(self, models: Optional[List[str]], *, selected: Optional[str] = None) -> None:
+        models_list = [str(m) for m in (models or []) if str(m).strip()]
+        if not models_list:
+            models_list = ["default"]
+        current = str(selected or self.model_combo.currentText() or "default").strip() or "default"
+        if current not in models_list:
+            models_list = [current] + models_list
+        self.model_combo.blockSignals(True)
+        self.model_combo.clear()
+        self.model_combo.addItems(models_list)
+        self.model_combo.setCurrentText(current if current in models_list else models_list[0])
+        self.model_combo.blockSignals(False)
 
 
 # ── _HistoryLineEdit ──────────────────────────────────────────────────────────
@@ -259,28 +333,177 @@ class _HistoryLineEdit(QLineEdit):
         super().keyPressEvent(event)
 
 
+# ── _ZoomScrollArea ───────────────────────────────────────────────────────────
+class _ZoomScrollArea(QScrollArea):
+    """Scroll area: mouse wheel zooms, hold M1 and drag to pan."""
+
+    def __init__(self, viewer: "_ImageViewerDialog", parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self._viewer = viewer
+        self._panning = False
+        self._pan_anchor = QPoint()
+        self._pan_h_start = 0
+        self._pan_v_start = 0
+        self.viewport().setCursor(Qt.CursorShape.OpenHandCursor)
+        self.viewport().installEventFilter(self)
+
+    def eventFilter(self, watched: QObject, event: QEvent) -> bool:
+        if watched is self.viewport():
+            et = event.type()
+            if et == QEvent.Type.MouseButtonPress:
+                self.mousePressEvent(event)
+                return True
+            if et == QEvent.Type.MouseMove:
+                self.mouseMoveEvent(event)
+                return True
+            if et == QEvent.Type.MouseButtonRelease:
+                self.mouseReleaseEvent(event)
+                return True
+            if et == QEvent.Type.Wheel:
+                self.wheelEvent(event)
+                return True
+        return super().eventFilter(watched, event)
+
+    def wheelEvent(self, event: QWheelEvent) -> None:
+        delta = event.angleDelta().y()
+        if delta == 0:
+            super().wheelEvent(event)
+            return
+        steps = delta / 120.0
+        factor = 1.25 ** steps
+        pos = event.position().toPoint()
+        self._viewer._adjust_zoom(factor, pos)
+        event.accept()
+
+    def mousePressEvent(self, event) -> None:
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._panning = True
+            self._pan_anchor = event.position().toPoint()
+            self._pan_h_start = self.horizontalScrollBar().value()
+            self._pan_v_start = self.verticalScrollBar().value()
+            self.viewport().setCursor(Qt.CursorShape.ClosedHandCursor)
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event) -> None:
+        if self._panning:
+            delta = event.position().toPoint() - self._pan_anchor
+            self.horizontalScrollBar().setValue(self._pan_h_start - delta.x())
+            self.verticalScrollBar().setValue(self._pan_v_start - delta.y())
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event) -> None:
+        if event.button() == Qt.MouseButton.LeftButton and self._panning:
+            self._panning = False
+            self.viewport().setCursor(Qt.CursorShape.OpenHandCursor)
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
+
 # ── _ImageViewerDialog ────────────────────────────────────────────────────────
 class _ImageViewerDialog(QWidget):
-    """Lightweight borderless viewer for clicking the main image to enlarge it."""
+    """Zoomable image viewer — upscales low-res frames for closer inspection."""
+
+    _MIN_ZOOM = 0.25
+    _MAX_ZOOM = 16.0
 
     def __init__(self, pixmap: QPixmap, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent, Qt.WindowType.Window)
+        self._source = pixmap if isinstance(pixmap, QPixmap) else QPixmap()
+        self._zoom = 1.0
+
         self.setWindowTitle("Image preview")
         self.setWindowIcon(_app_icon())
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
         self.setStyleSheet(f"background-color: {BRAND_BG};")
-        self.resize(max(640, min(1280, pixmap.width() or 800)),
-                    max(480, min(900,  pixmap.height() or 600)))
+
+        screen = QApplication.primaryScreen()
+        avail = screen.availableGeometry() if screen else None
+        max_w = int(avail.width() * 0.92) if avail else 1280
+        max_h = int(avail.height() * 0.88) if avail else 900
+        self.resize(max(640, max_w // 2), max(480, max_h // 2))
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(12, 12, 12, 12)
         layout.setSpacing(8)
 
-        self._viewer = _ScaledImageLabel()
-        self._viewer.setStyleSheet("background: rgba(255,255,255,0.05); border-radius: 8px;")
-        if not pixmap.isNull():
-            self._viewer.set_source_pixmap(pixmap)
-        layout.addWidget(self._viewer, stretch=1)
+        zoom_row = QHBoxLayout()
+        zoom_row.setSpacing(6)
+        zf = QFont("Segoe UI", 10)
+        zf.setWeight(QFont.Weight.Medium)
+
+        _tool_style = (
+            "QPushButton {"
+            "  background-color: rgba(184,221,255,0.15);"
+            "  color: rgba(255,255,255,0.90);"
+            "  border: 1px solid rgba(184,221,255,0.30);"
+            "  border-radius: 8px;"
+            "  padding: 4px 10px;"
+            "}"
+            "QPushButton:hover  { background-color: rgba(184,221,255,0.28); }"
+            "QPushButton:pressed{ background-color: rgba(184,221,255,0.10); }"
+        )
+
+        zoom_out_btn = QPushButton("−")
+        zoom_out_btn.setFont(zf)
+        zoom_out_btn.setFixedSize(36, 32)
+        zoom_out_btn.setStyleSheet(_tool_style)
+        zoom_out_btn.setToolTip("Zoom out")
+        zoom_out_btn.clicked.connect(lambda: self._adjust_zoom(1 / 1.25))
+        zoom_row.addWidget(zoom_out_btn)
+
+        self._zoom_lbl = QLabel("100%")
+        self._zoom_lbl.setFont(zf)
+        self._zoom_lbl.setStyleSheet("color: rgba(255,255,255,0.85); background: transparent;")
+        self._zoom_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._zoom_lbl.setMinimumWidth(64)
+        zoom_row.addWidget(self._zoom_lbl)
+
+        zoom_in_btn = QPushButton("+")
+        zoom_in_btn.setFont(zf)
+        zoom_in_btn.setFixedSize(36, 32)
+        zoom_in_btn.setStyleSheet(_tool_style)
+        zoom_in_btn.setToolTip("Zoom in")
+        zoom_in_btn.clicked.connect(lambda: self._adjust_zoom(1.25))
+        zoom_row.addWidget(zoom_in_btn)
+
+        fit_btn = QPushButton("Fit")
+        fit_btn.setFont(zf)
+        fit_btn.setStyleSheet(_tool_style)
+        fit_btn.setToolTip("Fit image to window")
+        fit_btn.clicked.connect(self._zoom_fit)
+        zoom_row.addWidget(fit_btn)
+
+        reset_btn = QPushButton("100%")
+        reset_btn.setFont(zf)
+        reset_btn.setStyleSheet(_tool_style)
+        reset_btn.setToolTip("Actual pixels (1:1)")
+        reset_btn.clicked.connect(lambda: self._set_zoom(1.0))
+        zoom_row.addWidget(reset_btn)
+
+        hint = QLabel("Scroll wheel to zoom · hold M1 and drag to pan")
+        hint.setFont(QFont("Segoe UI", 9))
+        hint.setStyleSheet("color: rgba(255,255,255,0.55); background: transparent;")
+        zoom_row.addStretch(1)
+        zoom_row.addWidget(hint)
+        layout.addLayout(zoom_row)
+
+        self._scroll = _ZoomScrollArea(self)
+        self._scroll.setWidgetResizable(False)
+        self._scroll.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self._scroll.setStyleSheet("background: rgba(255,255,255,0.05); border-radius: 8px;")
+
+        self._img_lbl = QLabel()
+        self._img_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        # Let the scroll area receive drag/wheel events over the pixmap.
+        self._img_lbl.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self._scroll.setWidget(self._img_lbl)
+        layout.addWidget(self._scroll, stretch=1)
 
         close_row = QHBoxLayout()
         close_row.addStretch(1)
@@ -292,9 +515,91 @@ class _ImageViewerDialog(QWidget):
         close_row.addWidget(close_btn)
         layout.addLayout(close_row)
 
+        QTimer.singleShot(0, self._apply_initial_zoom)
+
+    def _apply_initial_zoom(self) -> None:
+        self._set_zoom(self._default_zoom())
+
+    def _default_zoom(self) -> float:
+        if self._source.isNull():
+            return 1.0
+        iw = max(1, self._source.width())
+        ih = max(1, self._source.height())
+        vp = self._scroll.viewport()
+        avail_w = max(320, vp.width() - 8)
+        avail_h = max(240, vp.height() - 8)
+        fit = min(avail_w / iw, avail_h / ih)
+        # Low-res thumbnails benefit from starting above 1:1 when they are small.
+        if max(iw, ih) <= 512:
+            return min(self._MAX_ZOOM, max(2.0, fit))
+        return min(self._MAX_ZOOM, max(1.0, fit))
+
+    def _zoom_fit(self) -> None:
+        if self._source.isNull():
+            return
+        iw = max(1, self._source.width())
+        ih = max(1, self._source.height())
+        vp = self._scroll.viewport()
+        avail_w = max(1, vp.width() - 8)
+        avail_h = max(1, vp.height() - 8)
+        self._set_zoom(min(avail_w / iw, avail_h / ih))
+
+    def _set_zoom(self, zoom: float) -> None:
+        self._zoom = max(self._MIN_ZOOM, min(self._MAX_ZOOM, zoom))
+        self._refresh_image()
+        self._zoom_lbl.setText(f"{int(round(self._zoom * 100))}%")
+
+    def _adjust_zoom(self, factor: float, anchor: Optional[QPoint] = None) -> None:
+        if self._source.isNull() or factor <= 0:
+            return
+        old_zoom = self._zoom
+        new_zoom = max(self._MIN_ZOOM, min(self._MAX_ZOOM, old_zoom * factor))
+        if abs(new_zoom - old_zoom) < 1e-6:
+            return
+
+        vp = self._scroll.viewport()
+        if anchor is None:
+            anchor = QPoint(vp.width() // 2, vp.height() // 2)
+
+        hbar = self._scroll.horizontalScrollBar()
+        vbar = self._scroll.verticalScrollBar()
+        content_x = (hbar.value() + anchor.x()) / old_zoom
+        content_y = (vbar.value() + anchor.y()) / old_zoom
+
+        self._zoom = new_zoom
+        self._refresh_image()
+        self._zoom_lbl.setText(f"{int(round(self._zoom * 100))}%")
+
+        hbar.setValue(max(0, int(content_x * new_zoom - anchor.x())))
+        vbar.setValue(max(0, int(content_y * new_zoom - anchor.y())))
+
+    def _refresh_image(self) -> None:
+        if self._source.isNull():
+            self._img_lbl.clear()
+            self._img_lbl.setFixedSize(1, 1)
+            return
+        w = max(1, int(self._source.width() * self._zoom))
+        h = max(1, int(self._source.height() * self._zoom))
+        scaled = self._source.scaled(
+            w, h,
+            Qt.AspectRatioMode.IgnoreAspectRatio,
+            Qt.TransformationMode.SmoothTransformation,
+        )
+        self._img_lbl.setPixmap(scaled)
+        self._img_lbl.setFixedSize(scaled.size())
+
     def keyPressEvent(self, event):
         if event.key() == Qt.Key.Key_Escape:
             self.close()
+            return
+        if event.key() in (Qt.Key.Key_Plus, Qt.Key.Key_Equal):
+            self._adjust_zoom(1.25)
+            return
+        if event.key() == Qt.Key.Key_Minus:
+            self._adjust_zoom(1 / 1.25)
+            return
+        if event.key() == Qt.Key.Key_0:
+            self._set_zoom(1.0)
             return
         super().keyPressEvent(event)
 
@@ -318,6 +623,9 @@ class _ScaledImageLabel(QLabel):
     def set_source_pixmap(self, pixmap: QPixmap) -> None:
         self._source = pixmap
         self._refresh()
+
+    def source_pixmap(self) -> Optional[QPixmap]:
+        return self._source
 
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
@@ -365,11 +673,6 @@ class ResponsePopoutWindow(QWidget):
         root.setContentsMargins(24, 20, 24, 20)
         root.setSpacing(16)
 
-        # ── Query header ──────────────────────────────────────────────────────
-        self._query_lbl = _section_title("")
-        self._query_lbl.setWordWrap(True)
-        root.addWidget(self._query_lbl)
-
         # ── Main content row ──────────────────────────────────────────────────
         content_row = QHBoxLayout()
         content_row.setSpacing(16)
@@ -384,6 +687,7 @@ class ResponsePopoutWindow(QWidget):
         self._img_display.setStyleSheet(
             "background: rgba(255,255,255,0.08); border-radius: 10px;"
         )
+        self._img_display.mousePressEvent = self._on_image_clicked
         img_card_layout.addWidget(self._img_display, stretch=1)
         content_row.addWidget(img_card, stretch=1)
 
@@ -397,6 +701,7 @@ class ResponsePopoutWindow(QWidget):
         mf = QFont("Segoe UI", 11)
         self._detail_labels: dict[str, QLabel] = {}
         for label_text, field in [
+            ("Query",           "query"),
             ("Edge Device",     "edge_device"),
             ("Image",           "image"),
             ("Confidence Rate", "confidence_rate"),
@@ -491,6 +796,17 @@ class ResponsePopoutWindow(QWidget):
         # Populate initial view
         self._navigate(self._index)
 
+    def _on_image_clicked(self, event) -> None:
+        if event.button() != Qt.MouseButton.LeftButton:
+            return
+        pixmap = self._img_display.source_pixmap()
+        if not isinstance(pixmap, QPixmap) or pixmap.isNull():
+            return
+        viewer = _ImageViewerDialog(pixmap, parent=self)
+        viewer.show()
+        viewer.raise_()
+        viewer.activateWindow()
+
     # ── navigation ────────────────────────────────────────────────────────────
     def _navigate(self, index: int) -> None:
         self._index = max(0, min(index, len(self._images) - 1))
@@ -498,16 +814,20 @@ class ResponsePopoutWindow(QWidget):
         metadata = item.get("metadata") or {}
         pixmap   = item.get("pixmap")
 
-        # Window title + query header
-        snippet = (metadata.get("query") or "Query")[:80]
+        # Window title
+        query_text = str(metadata.get("query") or "").strip()
+        snippet = (query_text or "Query")[:80]
         self.setWindowTitle(f"Response – {snippet}")
-        self._query_lbl.setText(f"Query: {metadata.get('query', '')}")
 
         # Image
         if isinstance(pixmap, QPixmap) and not pixmap.isNull():
             self._img_display.set_source_pixmap(pixmap)
+            self._img_display.setCursor(Qt.CursorShape.PointingHandCursor)
+            self._img_display.setToolTip("Click to open zoomable viewer")
         else:
-            self._img_display.clear()
+            self._img_display.set_source_pixmap(QPixmap())
+            self._img_display.unsetCursor()
+            self._img_display.setToolTip("")
 
         # Detail labels
         for field, lbl in self._detail_labels.items():
@@ -587,11 +907,15 @@ class MainWindow(QMainWindow):
         self._target_devices: list[str] = []
         self._available_devices: list[str] = []
         self._on_targets_changed_callback: Optional[Callable[[List[str]], None]] = None
+        self._on_models_changed_callback: Optional[Callable[[str, str], None]] = None
         self._target_chip_widgets: dict[str, _TargetChip] = {}
+        self._model_by_device: dict[str, str] = {}
+        self._available_models_by_device: dict[str, list[str]] = {}
 
         # ── QoL state ─────────────────────────────────────────────────────────
         # #11 Query history (oldest → newest).
         self._query_history: list[str] = []
+        self._last_sent_query: str = ""
         self._max_history = 50
         # #15 Animated pending spinner.
         self._spinner_timer = QTimer(self)
@@ -632,11 +956,12 @@ class MainWindow(QMainWindow):
 
         # ── Query card ────────────────────────────────────────────────────────
         query_card = CardWidget()
-        # Slightly taller now that we host the targets row + chips inside the same card.
-        query_card.setFixedHeight(290)
+        # Do not use setFixedHeight here — it plus a bottom stretch collapses spacing to 0.
         ql = query_card.content_layout()
+        ql.setSpacing(0)
+        ql.setSizeConstraint(QLayout.SizeConstraint.SetMinimumSize)
         ql.addWidget(_section_title("Query"))
-        ql.addSpacing(10)
+        ql.addSpacing(_QUERY_SECTION_GAP)
 
         # Targets row: header + Add picker + chips strip.
         targets_header_row = QHBoxLayout()
@@ -677,12 +1002,13 @@ class MainWindow(QMainWindow):
         )
         targets_header_row.addWidget(self.targets_summary_lbl)
         ql.addLayout(targets_header_row)
+        ql.addSpacing(_QUERY_SECTION_GAP)
 
         # Scrollable chip strip (so 10+ chips don't blow up the layout).
         self._chips_container = QWidget()
         self._chips_container.setStyleSheet("background: transparent;")
         self._chips_layout = QHBoxLayout(self._chips_container)
-        self._chips_layout.setContentsMargins(0, 4, 0, 4)
+        self._chips_layout.setContentsMargins(0, 2, 0, 2)
         self._chips_layout.setSpacing(6)
         self._chips_layout.addStretch(1)
         chips_scroll = QScrollArea()
@@ -690,11 +1016,11 @@ class MainWindow(QMainWindow):
         chips_scroll.setFrameShape(QFrame.Shape.NoFrame)
         chips_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         chips_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        chips_scroll.setFixedHeight(34)
+        chips_scroll.setFixedHeight(44)
         chips_scroll.setStyleSheet("background: transparent;")
         chips_scroll.setWidget(self._chips_container)
         ql.addWidget(chips_scroll)
-        ql.addSpacing(4)
+        ql.addSpacing(_QUERY_SECTION_GAP)
 
         self.query_input = _HistoryLineEdit(lambda: list(self._query_history))
         self.query_input.setPlaceholderText("Enter query…   (Enter to send · ↑/↓ history)")
@@ -713,7 +1039,7 @@ class MainWindow(QMainWindow):
         # #10 — Enter sends the query.
         self.query_input.returnPressed.connect(self._on_send_clicked)
         ql.addWidget(self.query_input)
-        ql.addSpacing(10)
+        ql.addSpacing(_QUERY_SECTION_GAP)
 
         btn_row = QHBoxLayout()
         btn_row.setSpacing(10)
@@ -749,6 +1075,7 @@ class MainWindow(QMainWindow):
         btn_row.addStretch(1)
 
         ql.addLayout(btn_row)
+        ql.addSpacing(_QUERY_SECTION_GAP)
 
         # Auto resend controls (host-driven; interval paces new sends after each response).
         auto_row = QHBoxLayout()
@@ -803,9 +1130,9 @@ class MainWindow(QMainWindow):
         self.auto_resend_duration.setSuffix(" s")
         self.auto_resend_duration.setFixedWidth(100)
         self.auto_resend_duration.setToolTip(
-            "Wall clock from Send: last auto-query is allowed before this time runs out. "
+            "Wall clock from when Auto Resend is turned on (or from Send if you send later). "
             "0 = keep sending until you turn Auto Resend off. "
-            "Next send is scheduled after each reply, at least 'Every' seconds after the last send."
+            "Cadence: one timer per successful send, every 'Every' seconds."
         )
         self.auto_resend_duration.setStyleSheet(
             "QSpinBox {"
@@ -821,6 +1148,7 @@ class MainWindow(QMainWindow):
 
         auto_row.addStretch(1)
         ql.addLayout(auto_row)
+        ql.addSpacing(_QUERY_SECTION_GAP)
 
         self.auto_resend_session_lbl = QLabel("")
         srf = QFont("Segoe UI", 10)
@@ -853,7 +1181,11 @@ class MainWindow(QMainWindow):
         status_row.addWidget(self.query_id_label, alignment=Qt.AlignmentFlag.AlignLeft)
         status_row.addStretch(1)
         ql.addLayout(status_row)
-        ql.addStretch(1)
+
+        query_card.setSizePolicy(
+            QSizePolicy.Policy.Preferred,
+            QSizePolicy.Policy.Minimum,
+        )
 
         left_col.addWidget(query_card)
 
@@ -1114,6 +1446,93 @@ class MainWindow(QMainWindow):
         """
         self._on_targets_changed_callback = callback
 
+    def set_models_changed_callback(
+        self, callback: Optional[Callable[[str, str], None]]
+    ) -> None:
+        """Owner syncs per-device model picks back to Available Devices."""
+        self._on_models_changed_callback = callback
+
+    @staticmethod
+    def mqtt_model_name(selected: str) -> Optional[str]:
+        name = str(selected or "").strip()
+        if not name or name.lower() == "default":
+            return None
+        return name
+
+    def get_selected_model_for_device(self, device_name: str) -> str:
+        device_name = str(device_name or "").strip()
+        if not device_name:
+            return "default"
+        return str(self._model_by_device.get(device_name) or "default")
+
+    def resolve_query_model_groups(
+        self, target_devices: Optional[List[str]]
+    ) -> List[Tuple[List[str], Optional[str]]]:
+        """Group targets by model for MQTT (one send per distinct model)."""
+        targets = [
+            str(t).strip()
+            for t in (target_devices or [])
+            if isinstance(t, str) and t.strip()
+        ]
+        if not targets:
+            return [([], None)]
+
+        groups: dict[Optional[str], list[str]] = {}
+        for name in targets:
+            wire_model = self.mqtt_model_name(self.get_selected_model_for_device(name))
+            groups.setdefault(wire_model, []).append(name)
+        return [(device_names, model) for model, device_names in groups.items()]
+
+    def set_device_model_catalog(
+        self,
+        models_by_device: Optional[Dict[str, str]] = None,
+        available_by_device: Optional[Dict[str, List[str]]] = None,
+    ) -> None:
+        """Seed or refresh model choices (e.g. from Available Devices)."""
+        if models_by_device:
+            for name, model in models_by_device.items():
+                n = str(name or "").strip()
+                if n:
+                    self._model_by_device[n] = str(model or "default")
+        if available_by_device:
+            for name, models in available_by_device.items():
+                n = str(name or "").strip()
+                if not n:
+                    continue
+                if isinstance(models, list):
+                    self._available_models_by_device[n] = [
+                        str(m) for m in models if str(m).strip()
+                    ]
+        for name, chip in self._target_chip_widgets.items():
+            chip.set_available_models(
+                self._available_models_by_device.get(name),
+                selected=self.get_selected_model_for_device(name),
+            )
+
+    def set_model_for_device(self, device_name: str, model: str) -> None:
+        """Update one target's model without rebuilding chips (sync from Devices UI)."""
+        device_name = str(device_name or "").strip()
+        if not device_name:
+            return
+        self._model_by_device[device_name] = str(model or "default")
+        chip = self._target_chip_widgets.get(device_name)
+        if chip is not None:
+            chip.set_model(self._model_by_device[device_name])
+
+    def set_available_models_for_device(self, device_name: str, models: List[str]) -> None:
+        device_name = str(device_name or "").strip()
+        if not device_name:
+            return
+        self._available_models_by_device[device_name] = [
+            str(m) for m in (models or []) if str(m).strip()
+        ]
+        chip = self._target_chip_widgets.get(device_name)
+        if chip is not None:
+            chip.set_available_models(
+                self._available_models_by_device[device_name],
+                selected=self.get_selected_model_for_device(device_name),
+            )
+
     def set_target_devices(self, devices) -> None:
         """Replace the current target list (broadcast when empty/None)."""
         cleaned: list[str] = []
@@ -1176,6 +1595,7 @@ class MainWindow(QMainWindow):
         self._metadata_ready.emit(metadata)
 
     def _update_metadata_on_main_thread(self, metadata: dict):
+        metadata = self._enrich_metadata(metadata)
         self._current_metadata = dict(metadata)
 
         for field, value in metadata.items():
@@ -1235,6 +1655,7 @@ class MainWindow(QMainWindow):
 
     def _add_image_on_main_thread(self, image_path_or_data: str, metadata: dict):
         """Always runs on the main thread via Qt signal. Safe to create/update widgets here."""
+        metadata = self._enrich_metadata(metadata)
         px = self._load_pixmap(image_path_or_data)
 
         # ── Add thumbnail to right-panel grid ─────────────────────────────────
@@ -1386,18 +1807,48 @@ class MainWindow(QMainWindow):
     def _on_popout_clicked(self) -> None:
         self._open_popout()
 
+    def _resolve_query_text(self, metadata: Optional[dict] = None) -> str:
+        """Best-effort query string for pop-out / metadata enrichment."""
+        md = metadata or {}
+        q = str(md.get("query") or "").strip()
+        if q:
+            return q
+        for candidate in (
+            self._last_sent_query,
+            self.query_input.text().strip(),
+            (self._query_history[-1] if self._query_history else ""),
+            str((self._current_metadata or {}).get("query") or "").strip(),
+        ):
+            if candidate:
+                return candidate
+        return ""
+
+    def _enrich_metadata(self, metadata: Optional[dict]) -> dict:
+        md = dict(metadata or {})
+        if not str(md.get("query") or "").strip():
+            resolved = self._resolve_query_text(md)
+            if resolved:
+                md["query"] = resolved
+        return md
+
     def _open_popout(self, _metadata: dict = None, _pixmap: Optional[QPixmap] = None) -> None:
         """Open a navigable pop-out window showing all responses received so far."""
         if self.returned_images:
             # Snapshot — strip the thumbnail QLabel, only keep what the popout needs.
             images = [
-                {"metadata": item.get("metadata", {}), "pixmap": item.get("pixmap")}
+                {
+                    "metadata": self._enrich_metadata(item.get("metadata", {})),
+                    "pixmap": item.get("pixmap"),
+                }
                 for item in self.returned_images
             ]
             index = max(0, self._selected_index) if self._selected_index >= 0 else len(images) - 1
         elif self._current_metadata:
             # No images yet (text-only response) — wrap current metadata.
-            images = [{"metadata": self._current_metadata, "pixmap": self._current_pixmap}]
+            images = [{
+                "metadata": self._enrich_metadata(self._current_metadata),
+                "pixmap": self._current_pixmap,
+            }]
             index = 0
         else:
             return
@@ -1433,6 +1884,16 @@ class MainWindow(QMainWindow):
         # Note: MQTT cancel_query_request wiring lives in the host entrypoint.
         print("[Query] Cancel clicked — auto-resend stopped")
 
+    def sync_auto_resend_off(self) -> None:
+        """Host ended a timed session — uncheck toggle without re-notifying the host."""
+        self._auto_resend_enabled = False
+        self.auto_resend_btn.blockSignals(True)
+        self.auto_resend_btn.setChecked(False)
+        self.auto_resend_btn.setText("↻  Auto Resend: OFF")
+        self.auto_resend_btn.setStyleSheet(self._auto_sep_style(False))
+        self.auto_resend_btn.blockSignals(False)
+        self.set_auto_resend_session_deadline(None)
+
     def _on_auto_resend_toggled(self, enabled: bool) -> None:
         self._auto_resend_enabled = bool(enabled)
         self.auto_resend_btn.setText("↻  Auto Resend: ON" if enabled else "↻  Auto Resend: OFF")
@@ -1456,6 +1917,8 @@ class MainWindow(QMainWindow):
         if not text:
             print("[Query] No query text entered")
             return
+
+        self._last_sent_query = text
 
         # #11 — push to history (skip duplicates of the most recent entry).
         if not self._query_history or self._query_history[-1] != text:
@@ -1490,8 +1953,16 @@ class MainWindow(QMainWindow):
                 w.deleteLater()
 
         for name in self._target_devices:
-            chip = _TargetChip(name, parent=self._chips_container)
+            if name not in self._model_by_device:
+                self._model_by_device[name] = "default"
+            chip = _TargetChip(
+                name,
+                model=self.get_selected_model_for_device(name),
+                available_models=self._available_models_by_device.get(name),
+                parent=self._chips_container,
+            )
             chip.removed.connect(self._on_chip_removed)
+            chip.model_changed.connect(self._on_chip_model_changed)
             self._chips_layout.insertWidget(self._chips_layout.count() - 1, chip)
             self._target_chip_widgets[name] = chip
 
@@ -1500,9 +1971,12 @@ class MainWindow(QMainWindow):
         if n == 0:
             self.targets_summary_lbl.setText("Broadcast — all devices")
         elif n == 1:
-            self.targets_summary_lbl.setText("Targeting 1 device")
+            m = self.get_selected_model_for_device(self._target_devices[0])
+            self.targets_summary_lbl.setText(
+                f"Targeting 1 device · model: {m}"
+            )
         else:
-            self.targets_summary_lbl.setText(f"Targeting {n} devices")
+            self.targets_summary_lbl.setText(f"Targeting {n} devices · per-chip models")
 
         if self._on_targets_changed_callback:
             try:
@@ -1513,7 +1987,24 @@ class MainWindow(QMainWindow):
     def _on_chip_removed(self, name: str) -> None:
         if name in self._target_devices:
             self._target_devices = [d for d in self._target_devices if d != name]
+            self._model_by_device.pop(name, None)
             self._rebuild_chips()
+
+    def _on_chip_model_changed(self, device_name: str, model: str) -> None:
+        device_name = str(device_name or "").strip()
+        if not device_name:
+            return
+        self._model_by_device[device_name] = str(model or "default")
+        n = len(self._target_devices)
+        if n == 1 and self._target_devices[0] == device_name:
+            self.targets_summary_lbl.setText(
+                f"Targeting 1 device · model: {self._model_by_device[device_name]}"
+            )
+        if self._on_models_changed_callback:
+            try:
+                self._on_models_changed_callback(device_name, self._model_by_device[device_name])
+            except Exception as exc:
+                print(f"[Query] models_changed callback error: {exc!r}")
 
     def _rebuild_add_target_menu(self) -> None:
         self.add_target_menu.clear()

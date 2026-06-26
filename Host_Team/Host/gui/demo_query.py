@@ -159,9 +159,12 @@ class DemoBackend:
         return {}
 
     def send_query_request(self, query_text: str,
-                           target_devices: Optional[List[str]] = None) -> str:
-        query_id = f"demo-{uuid.uuid4().hex[:8]}"
+                           target_devices: Optional[List[str]] = None,
+                           model: Optional[str] = None,
+                           query_id: Optional[str] = None) -> str:
+        query_id = query_id or f"demo-{uuid.uuid4().hex[:8]}"
         targets = [t for t in (target_devices or []) if isinstance(t, str) and t.strip()]
+        model_note = f", model={model!r}" if model else ""
 
         if not targets:
             # Broadcast — single response from a generic source name.
@@ -170,7 +173,7 @@ class DemoBackend:
                 self._emit_query_response,
                 args=("demo-edge-01", query_text, query_id),
             ).start()
-            print(f"[DEMO] Queued broadcast query_response (query_id={query_id})")
+            print(f"[DEMO] Queued broadcast query_response (query_id={query_id}{model_note})")
             return query_id
 
         for i, target in enumerate(targets):
@@ -179,7 +182,7 @@ class DemoBackend:
                 delay, self._emit_query_response, args=(target, query_text, query_id)
             ).start()
         print(f"[DEMO] Queued {len(targets)} fake response(s) for "
-              f"query_id={query_id} → {', '.join(targets)}")
+              f"query_id={query_id}{model_note} → {', '.join(targets)}")
         return query_id
 
     def close(self) -> None:

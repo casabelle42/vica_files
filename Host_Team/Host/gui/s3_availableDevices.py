@@ -1,4 +1,4 @@
-from typing import Optional
+from typing import Optional, List, Tuple
 from pathlib import Path
 import os
 import sys
@@ -320,6 +320,7 @@ class MainWindow(QMainWindow):
         self._panel_layout.invalidate()
         self.devices_panel.adjustSize()
         self.devices_panel.update()
+        self._sync_models_to_query_window()
 
     def selected_devices(self) -> list[str]:
         """Return the current set of devices the user has marked as targets."""
@@ -331,6 +332,73 @@ class MainWindow(QMainWindow):
         if not device_name:
             return "default"
         return str(self._selected_model_by_device.get(device_name) or "default")
+
+    def set_selected_model_for_device(self, device_name: str, model: str) -> None:
+        """Set model for a device and sync Devices + Query UIs."""
+        device_name = str(device_name or "").strip()
+        if not device_name:
+            return
+        model = str(model or "default")
+        self._selected_model_by_device[device_name] = model
+        wd = self.device_widgets.get(device_name)
+        if wd and isinstance(wd.get("model_combo"), QComboBox):
+            combo = wd["model_combo"]
+            combo.blockSignals(True)
+            if combo.findText(model) < 0:
+                combo.insertItem(0, model)
+            combo.setCurrentText(model)
+            combo.blockSignals(False)
+        self._sync_models_to_query_window()
+
+    def models_by_device(self) -> dict[str, str]:
+        return dict(self._selected_model_by_device)
+
+    def available_models_catalog(self) -> dict[str, list[str]]:
+        catalog: dict[str, list[str]] = {}
+        for name, wd in self.device_widgets.items():
+            combo = wd.get("model_combo")
+            if isinstance(combo, QComboBox):
+                catalog[name] = [combo.itemText(i) for i in range(combo.count())]
+        return catalog
+
+    def _sync_models_to_query_window(self) -> None:
+        qw = self._query_window
+        if qw is None:
+            return
+        if hasattr(qw, "set_device_model_catalog"):
+            try:
+                qw.set_device_model_catalog(
+                    self.models_by_device(),
+                    self.available_models_catalog(),
+                )
+            except Exception as exc:
+                print(f"[AvailableDevices] Failed to sync models to query window: {exc!r}")
+
+    @staticmethod
+    def mqtt_model_name(selected: str) -> Optional[str]:
+        """Map UI dropdown value to query_request body model (omit for default)."""
+        name = str(selected or "").strip()
+        if not name or name.lower() == "default":
+            return None
+        return name
+
+    def resolve_query_model_groups(
+        self, target_devices: Optional[List[str]]
+    ) -> List[Tuple[List[str], Optional[str]]]:
+        """Group targets by selected model — one MQTT send per distinct model."""
+        targets = [
+            str(t).strip()
+            for t in (target_devices or [])
+            if isinstance(t, str) and t.strip()
+        ]
+        if not targets:
+            return [([], None)]
+
+        groups: dict[Optional[str], list[str]] = {}
+        for name in targets:
+            wire_model = self.mqtt_model_name(self.get_selected_model_for_device(name))
+            groups.setdefault(wire_model, []).append(name)
+        return [(device_names, model) for model, device_names in groups.items()]
 
     def set_selected_devices(self, names) -> None:
         """Programmatically replace the current selection (e.g. from QueryWindow chips)."""
@@ -368,6 +436,14 @@ class MainWindow(QMainWindow):
                 self._update_device_models(name, status.get("available_models"), wd["model_combo"])
         for d in self.devices:
             if d["name"] == name: d.update(status); break
+        qw = self._query_window
+        if qw is not None and hasattr(qw, "set_available_models_for_device"):
+            models = status.get("models") or status.get("available_models")
+            if isinstance(models, list):
+                try:
+                    qw.set_available_models_for_device(name, [str(m) for m in models])
+                except Exception:
+                    pass
 
     # ── private ───────────────────────────────────────────────────────────────
     def _on_discover_clicked(self):
@@ -394,6 +470,9 @@ class MainWindow(QMainWindow):
             # the checkboxes here so both views stay coherent.
             if hasattr(self._query_window, "set_targets_changed_callback"):
                 self._query_window.set_targets_changed_callback(self.set_selected_devices)
+            if hasattr(self._query_window, "set_models_changed_callback"):
+                self._query_window.set_models_changed_callback(self.set_selected_model_for_device)
+            self._sync_models_to_query_window()
             self._query_window.show()
         else:
             if self._on_query_callback and hasattr(self._query_window, "set_query_callback"):
@@ -406,6 +485,9 @@ class MainWindow(QMainWindow):
                 self._query_window.set_available_devices(list(self.device_widgets.keys()))
             if hasattr(self._query_window, "set_targets_changed_callback"):
                 self._query_window.set_targets_changed_callback(self.set_selected_devices)
+            if hasattr(self._query_window, "set_models_changed_callback"):
+                self._query_window.set_models_changed_callback(self.set_selected_model_for_device)
+            self._sync_models_to_query_window()
             self._query_window.raise_()
             self._query_window.activateWindow()
 
@@ -524,6 +606,10 @@ class MainWindow(QMainWindow):
             "  selection-background-color: rgba(29,43,161,0.18);"
             "}"
         )
+        active = device.get("active_model")
+        if isinstance(active, str) and active.strip() and device_name not in self._selected_model_by_device:
+            self._selected_model_by_device[device_name] = active.strip()
+
         self._update_device_models(
             device_name,
             device.get("models") or device.get("available_models"),
@@ -531,7 +617,7 @@ class MainWindow(QMainWindow):
         )
 
         def _on_model_changed(text, name=device_name):  # noqa: ANN001
-            self._selected_model_by_device[str(name)] = str(text or "default")
+            self.set_selected_model_for_device(str(name), str(text or "default"))
 
         model_combo.currentTextChanged.connect(_on_model_changed)
         rl.addWidget(model_combo, stretch=0)

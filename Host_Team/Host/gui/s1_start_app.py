@@ -94,7 +94,9 @@ class HostBackend(Protocol):
                      reply_topic: Optional[str] = None,
                      timeout: Optional[float] = None) -> dict: ...
     def send_query_request(self, query_text: str,
-                           target_devices: Optional[List[str]] = None) -> str: ...
+                           target_devices: Optional[List[str]] = None,
+                           model: Optional[str] = None,
+                           query_id: Optional[str] = None) -> str: ...
 
     # Optional — backends may override; default no-op when absent.
     def close(self) -> None: ...
@@ -130,8 +132,15 @@ class MqttBackend:
         return self._sender.send_command(cmd, reply_topic=reply_topic, timeout=timeout)
 
     def send_query_request(self, query_text: str,
-                           target_devices: Optional[List[str]] = None) -> str:
-        return self._sender.send_query_request(query_text, target_devices=target_devices)
+                           target_devices: Optional[List[str]] = None,
+                           model: Optional[str] = None,
+                           query_id: Optional[str] = None) -> str:
+        return self._sender.send_query_request(
+            query_text,
+            target_devices=target_devices,
+            model=model,
+            query_id=query_id,
+        )
 
     def close(self) -> None:
         try:
@@ -191,6 +200,8 @@ class UiDispatcher(QObject):
     auto_resend_session_deadline_signal = pyqtSignal(object)
     # Fired from the background auto-resend timer; slot runs on the Qt main thread.
     auto_resend_due_signal = pyqtSignal()
+    # Sync Query UI when the host ends a timed auto-resend session (do not re-enter host callback).
+    auto_resend_force_off_signal = pyqtSignal()
 
     def __init__(self, window):
         super().__init__()
@@ -366,13 +377,19 @@ def run_app(backend: HostBackend,
             meta_bits.append("Processing")
         metadata = " • ".join(meta_bits) if meta_bits else "N/A"
 
-        return {
+        gui_dev = {
             "name": name,
             "location": "IP: unknown",
             "status": "Online",
             "connection": connection,
             "metadata": metadata,
         }
+        if isinstance(body.get("available_models"), list):
+            gui_dev["available_models"] = body["available_models"]
+        active = body.get("active_model")
+        if isinstance(active, str) and active.strip():
+            gui_dev["active_model"] = active.strip()
+        return gui_dev
 
     def _emit_full_device_list():
         with devices_lock:
@@ -399,6 +416,51 @@ def run_app(backend: HostBackend,
     }
     _auto_timer = {"t": None}
     _auto_was_enabled = False
+
+    def _cancel_auto_timer() -> None:
+        try:
+            tprev = _auto_timer.get("t")
+            if tprev is not None:
+                tprev.cancel()
+        except Exception:
+            pass
+        _auto_timer["t"] = None
+
+    def _arm_auto_resend_session(anchor_ts: Optional[float] = None) -> None:
+        """Start or refresh the wall-clock session window from duration_sec."""
+        try:
+            dur = int(_auto_resend.get("duration_sec") or 0)
+        except Exception:
+            dur = 0
+        if dur <= 0:
+            _auto_resend["until_ts"] = None
+        else:
+            started = float(anchor_ts if anchor_ts is not None else time.time())
+            _auto_resend["until_ts"] = started + float(dur)
+        _safe_emit_signal(
+            ui,
+            ui.auto_resend_session_deadline_signal,
+            _auto_resend.get("until_ts"),
+        )
+
+    def _auto_resend_expired(now_ts: Optional[float] = None) -> bool:
+        until_ts = _auto_resend.get("until_ts")
+        if not isinstance(until_ts, (int, float)):
+            return False
+        now = time.time() if now_ts is None else float(now_ts)
+        return now >= float(until_ts)
+
+    def _stop_auto_resend_session() -> None:
+        """End timed auto-resend: cancel timer, clear state, sync Query UI toggle."""
+        _auto_resend["enabled"] = False
+        nonlocal _auto_was_enabled
+        _auto_was_enabled = False
+        _cancel_auto_timer()
+        _auto_resend["until_ts"] = None
+        _auto_resend["last_targets"] = None
+        _auto_resend["last_send_ts"] = None
+        _safe_emit_signal(ui, ui.auto_resend_session_deadline_signal, None)
+        _safe_emit_signal(ui, ui.auto_resend_force_off_signal)
 
     def _on_packet(pkt: Dict[str, Any]) -> None:
         try:
@@ -436,13 +498,19 @@ def run_app(backend: HostBackend,
                                 meta_bits.append("Processing")
                             metadata = " • ".join(meta_bits) if meta_bits else "N/A"
 
-                            devices_by_name[name] = {
+                            dev_entry = {
                                 "name": name,
                                 "location": "IP: unknown",
                                 "status": status,
                                 "connection": connection,
                                 "metadata": metadata,
                             }
+                            if isinstance(d.get("available_models"), list):
+                                dev_entry["available_models"] = d["available_models"]
+                            active = d.get("active_model")
+                            if isinstance(active, str) and active.strip():
+                                dev_entry["active_model"] = active.strip()
+                            devices_by_name[name] = dev_entry
                     _emit_full_device_list()
                 return
 
@@ -470,18 +538,9 @@ def run_app(backend: HostBackend,
 
                 # Wall-clock session end (checked on every reply, including late ones).
                 try:
-                    if _auto_resend.get("enabled"):
-                        until_ts_stop = _auto_resend.get("until_ts")
-                        if isinstance(until_ts_stop, (int, float)) and time.time() >= float(until_ts_stop):
-                            _auto_resend["enabled"] = False
-                            try:
-                                tprev = _auto_timer.get("t")
-                                if tprev is not None:
-                                    tprev.cancel()
-                            except Exception:
-                                pass
-                            _safe_emit_signal(ui, ui.auto_resend_session_deadline_signal, None)
-                            return
+                    if _auto_resend.get("enabled") and _auto_resend_expired():
+                        _stop_auto_resend_session()
+                        return
                 except Exception:
                     pass
                 return
@@ -546,23 +605,17 @@ def run_app(backend: HostBackend,
         if not _auto_resend.get("enabled"):
             return
         now_ts = time.time()
-        until_ts = _auto_resend.get("until_ts")
-        if isinstance(until_ts, (int, float)) and now_ts >= float(until_ts):
-            _auto_resend["enabled"] = False
-            try:
-                tprev = _auto_timer.get("t")
-                if tprev is not None:
-                    tprev.cancel()
-            except Exception:
-                pass
-            _safe_emit_signal(ui, ui.auto_resend_session_deadline_signal, None)
-            return
+        # Timed session with no deadline yet (e.g. armed only on toggle) — anchor now.
         try:
-            tprev = _auto_timer.get("t")
-            if tprev is not None:
-                tprev.cancel()
+            dur = int(_auto_resend.get("duration_sec") or 0)
         except Exception:
-            pass
+            dur = 0
+        if dur > 0 and _auto_resend.get("until_ts") is None:
+            _arm_auto_resend_session(now_ts)
+        if _auto_resend_expired(now_ts):
+            _stop_auto_resend_session()
+            return
+        _cancel_auto_timer()
         interval = int(_auto_resend.get("interval_sec") or 5)
         interval = max(1, interval)
 
@@ -596,23 +649,9 @@ def run_app(backend: HostBackend,
         if _auto_resend.get("enabled"):
             _auto_resend["last_targets"] = list(targets)
 
-        # If auto-resend is enabled, anchor session wall clock only on user Send (not each auto tick).
+        # User Send resets the wall-clock window; auto ticks keep the existing until_ts.
         if _auto_resend.get("enabled") and anchor_session:
-            try:
-                _auto_resend["duration_sec"] = int(_auto_resend.get("duration_sec") or 0)
-            except Exception:
-                _auto_resend["duration_sec"] = 0
-            started = time.time()
-            dur = int(_auto_resend.get("duration_sec") or 0)
-            if dur > 0:
-                _auto_resend["until_ts"] = started + float(dur)
-            else:
-                _auto_resend["until_ts"] = None
-            _safe_emit_signal(
-                ui,
-                ui.auto_resend_session_deadline_signal,
-                _auto_resend.get("until_ts"),
-            )
+            _arm_auto_resend_session(time.time())
 
         try:
             qw = handler._get_query_window()
@@ -627,7 +666,25 @@ def run_app(backend: HostBackend,
             pass
 
         try:
-            qid = backend.send_query_request(query_text, target_devices=targets)
+            model_groups: List[tuple] = [(targets, None)]
+            qw_models = handler._get_query_window()
+            try:
+                if qw_models and hasattr(qw_models, "resolve_query_model_groups"):
+                    model_groups = qw_models.resolve_query_model_groups(targets)
+                elif hasattr(devices_window, "resolve_query_model_groups"):
+                    model_groups = devices_window.resolve_query_model_groups(targets)
+            except Exception:
+                model_groups = [(targets, None)]
+
+            qid: Optional[str] = None
+            for group_targets, group_model in model_groups:
+                qid = backend.send_query_request(
+                    query_text,
+                    target_devices=group_targets or None,
+                    model=group_model,
+                    query_id=qid,
+                )
+
             with current_query_id_lock:
                 current_query_id["id"] = qid
             try:
@@ -639,10 +696,17 @@ def run_app(backend: HostBackend,
             try:
                 qw = handler._get_query_window()
                 if qw and hasattr(qw, "set_last_query_id"):
-                    qw.set_last_query_id(qid)
+                    qw.set_last_query_id(qid or "")
             except Exception:
                 pass
-            print(f"[HOST_MAIN] Query request sent (query_id={qid}, targets={targets_str})")
+            model_bits = [
+                f"{m or 'default'}→{', '.join(tg) if tg else 'broadcast'}"
+                for tg, m in model_groups
+            ]
+            print(
+                f"[HOST_MAIN] Query request sent (query_id={qid}, targets={targets_str}"
+                f"{', models: ' + '; '.join(model_bits) if any(m for _, m in model_groups) else ''})"
+            )
             if _auto_resend.get("enabled"):
                 _schedule_auto_resend_after_send()
         except Exception as e:
@@ -659,11 +723,8 @@ def run_app(backend: HostBackend,
         try:
             if not _auto_resend.get("enabled"):
                 return
-            until_ts2 = _auto_resend.get("until_ts")
-            now2 = time.time()
-            if isinstance(until_ts2, (int, float)) and now2 >= float(until_ts2):
-                _auto_resend["enabled"] = False
-                _safe_emit_signal(ui, ui.auto_resend_session_deadline_signal, None)
+            if _auto_resend_expired():
+                _stop_auto_resend_session()
                 return
             with current_query_text_lock:
                 qtxt = current_query_text.get("text", "")
@@ -696,21 +757,17 @@ def run_app(backend: HostBackend,
             _auto_resend["duration_sec"] = 0
         # Duration window is applied on the next Send.
         if not _auto_resend["enabled"]:
-            _auto_resend["until_ts"] = None
-            _auto_resend["last_targets"] = None
-            _auto_resend["last_send_ts"] = None
-            _auto_was_enabled = False
-            # Cancel any pending timer when turned off.
-            try:
-                tprev = _auto_timer.get("t")
-                if tprev is not None:
-                    tprev.cancel()
-            except Exception:
-                pass
-            _safe_emit_signal(ui, ui.auto_resend_session_deadline_signal, None)
+            _stop_auto_resend_session()
             return
 
         _auto_was_enabled = True
+        # Start wall-clock window as soon as Auto Resend is turned on (not only after Send).
+        try:
+            dur_on = int(_auto_resend.get("duration_sec") or 0)
+        except Exception:
+            dur_on = 0
+        if dur_on > 0:
+            _arm_auto_resend_session(time.time())
         # First transition to ON: arm cadence if there is already query text (no extra Send needed).
         if not was_enabled:
             try:
@@ -729,6 +786,17 @@ def run_app(backend: HostBackend,
             qw.set_auto_resend_session_deadline(ts if isinstance(ts, (int, float)) else None)
 
     ui.auto_resend_session_deadline_signal.connect(_forward_auto_resend_session_deadline)
+
+    def _sync_query_auto_resend_off() -> None:
+        try:
+            qw = handler._get_query_window()
+            if qw and hasattr(qw, "sync_auto_resend_off"):
+                qw.sync_auto_resend_off()
+        except Exception:
+            pass
+
+    ui.auto_resend_force_off_signal.connect(_sync_query_auto_resend_off)
+
     # Wire QueryWindow auto-resend toggle (if present).
     try:
         if hasattr(devices_window, "set_auto_resend_changed_callback"):
@@ -750,7 +818,7 @@ def run_app(backend: HostBackend,
 # Production entry point
 # ─────────────────────────────────────────────────────────────────────────────
 def main() -> int:
-    MQTT_BROKER_IP = os.environ.get("VICA_MQTT_BROKER", "10.148.0.95")
+    MQTT_BROKER_IP = os.environ.get("VICA_MQTT_BROKER", "10.148.1.64")
     MQTT_PORT = int(os.environ.get("VICA_MQTT_PORT", "1883"))
     CONTROL_TOPIC = os.environ.get("VICA_CONTROL_TOPIC", "edge/control")
 

@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import json
+import os
 import queue
 import threading
 import time
@@ -7,9 +8,13 @@ import uuid
 import paho.mqtt.client as mqtt
 
 
+DEFAULT_MQTT_BROKER = os.environ.get("VICA_MQTT_BROKER", "10.148.1.64")
+DEFAULT_MQTT_PORT = int(os.environ.get("VICA_MQTT_PORT", "1883"))
+
+
 class MQTTHostClient:
 
-    def __init__(self, mqtt_broker="localhost", mqtt_port=1883, auto_discover_on_connect: bool = False):
+    def __init__(self, mqtt_broker=DEFAULT_MQTT_BROKER, mqtt_port=DEFAULT_MQTT_PORT, auto_discover_on_connect: bool = False):
         self.mqtt_broker = mqtt_broker
         self.mqtt_port = mqtt_port
         self.auto_discover_on_connect = bool(auto_discover_on_connect)
@@ -174,9 +179,10 @@ class MQTTHostClient:
             "body": body,
         }
         self.outgoing_queue.put(("host/control", pkt))
+        model_log = body.get("model")
         print(
             f"[MQTTHostClient] Queued query_request id={query_id} "
-            f"targets={targets!r} topic=host/control"
+            f"targets={targets!r} model={model_log!r} topic=host/control"
         )
         return query_id
 
@@ -263,8 +269,8 @@ class HostCommandSender:
 
     def __init__(
         self,
-        mqtt_broker="localhost",
-        mqtt_port=1883,
+        mqtt_broker=DEFAULT_MQTT_BROKER,
+        mqtt_port=DEFAULT_MQTT_PORT,
         control_topic="host/control",  # accepted for compatibility; not used
         default_reply_topic=None,       # accepted for compatibility; not used
         request_timeout_sec=10.0,
@@ -309,20 +315,26 @@ class HostCommandSender:
         *,
         target_devices: list[str] | None = None,
         query_id: str | None = None,
+        model: str | None = None,
     ):
         """
         Send a query_request packet and return the query_id immediately.
         Use this for async UI flows that render query_response packets via on_packet.
         """
-        return self._client.send_query_request(query_text, query_id=query_id, target_devices=target_devices)
+        return self._client.send_query_request(
+            query_text,
+            query_id=query_id,
+            target_devices=target_devices,
+            model=model,
+        )
 
     def close(self):
         self._client.stop_background()
 
 
 if __name__ == "__main__":
-    NUC_BROKER_IP = "10.148.0.95"
-    NUC_BROKER_PORT = 1883
+    NUC_BROKER_IP = DEFAULT_MQTT_BROKER
+    NUC_BROKER_PORT = DEFAULT_MQTT_PORT
 
     # Standalone mode: auto-discover is convenient.
     host = MQTTHostClient(mqtt_broker=NUC_BROKER_IP, mqtt_port=NUC_BROKER_PORT, auto_discover_on_connect=True)

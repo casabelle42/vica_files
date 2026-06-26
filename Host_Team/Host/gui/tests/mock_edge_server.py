@@ -7,9 +7,10 @@ Simulates an edge device that responds to MQTT queries with test images.
 This allows testing the GUI without real edge devices or VILA inference.
 
 Features:
-- Responds to discovery requests with mock device info
-- Responds to query requests with pre-generated test images
-- Simulates realistic response times and metadata
+- Publishes device_status heartbeats on edge/status (NUC relay discovery cache)
+- Handles query_request packets on edge/control (current host packet format)
+- Publishes query_response chunks on edge/results
+- Legacy command: discover/query format still supported
 
 Usage:
     python mock_edge_server.py [--broker IP] [--port PORT]
@@ -48,6 +49,11 @@ except ImportError:
 
 # Test images directory
 TEST_IMAGES_DIR = current_dir / "test_images"
+
+# Topics used by Edge/client.py + Network/server.py relay
+STATUS_TOPIC = "edge/status"
+RESULTS_TOPIC = "edge/results"
+STATUS_INTERVAL_SEC = 2.0
 
 
 class MockEdgeDevice:
@@ -144,13 +150,78 @@ class MockEdgeServer:
         self.client = None
         self.running = False
         
-    def _create_header(self, message_type: str, source_device: str = "MockEdgeServer") -> Dict:
+    def _create_header(self, message_type: str, source_device: str) -> Dict:
         """Create a standard packet header."""
         return {
             "timestamp": datetime.now().isoformat(),
             "source_device": source_device,
             "message_type": message_type
         }
+
+    def _make_packet(self, message_type: str, body: Dict, source_device: str) -> Dict:
+        return {
+            "header": self._create_header(message_type, source_device),
+            "body": body,
+        }
+
+    def _publish_device_status(self, device: MockEdgeDevice) -> None:
+        """Heartbeat on edge/status — NUC relay caches these for discovery."""
+        if not self.client:
+            return
+        status = device.get_status()
+        pkt = self._make_packet(
+            "device_status",
+            {
+                "name": status["name"],
+                "cpu": float(status["cpu"]),
+                "ram": float(status["ram"]),
+                "gpu": float(status["gpu"]),
+                "network_strength": int(status["network_strength"]),
+                "isProcessing": bool(status["isProcessing"]),
+            },
+            device.device_name,
+        )
+        self.client.publish(STATUS_TOPIC, json.dumps(pkt))
+        print(f"[MockServer] Published device_status for {device.device_name}")
+
+    def _publish_all_device_status(self) -> None:
+        for device in self.devices:
+            self._publish_device_status(device)
+
+    def _status_loop(self) -> None:
+        while self.running:
+            try:
+                self._publish_all_device_status()
+            except Exception as e:
+                print(f"[MockServer] Status loop error: {e}")
+            time.sleep(STATUS_INTERVAL_SEC)
+
+    @staticmethod
+    def _parse_packet(payload: Dict) -> tuple:
+        """Return (message_type, body) for current or legacy host packets."""
+        if isinstance(payload, dict) and isinstance(payload.get("header"), dict):
+            header = payload["header"]
+            return header.get("message_type"), payload.get("body") or {}
+
+        command = (payload.get("command") or "").lower()
+        if command == "discover":
+            return "discovery", payload
+        if command == "query":
+            return "query_request", {
+                "query_id": payload.get("request_id") or str(uuid.uuid4()),
+                "query": payload.get("query", ""),
+            }
+        return None, {}
+
+    @staticmethod
+    def _should_process_query(device_name: str, body: Dict) -> bool:
+        targets = body.get("target_devices")
+        if not isinstance(targets, list) or not targets:
+            return True
+        normalized = {
+            str(t).strip().lower() for t in targets if isinstance(t, str) and t.strip()
+        }
+        return device_name.strip().lower() in normalized
     
     def _load_image_base64(self, image_name: str) -> Optional[str]:
         """Load an image and return as base64 string."""
@@ -163,35 +234,24 @@ class MockEdgeServer:
         with open(image_path, "rb") as f:
             return base64.b64encode(f.read()).decode("utf-8")
     
-    def _handle_discovery(self, message: Dict, reply_topic: str):
-        """Handle discovery request."""
-        print(f"[MockServer] Handling discovery request")
-        
-        # Build device list
-        devices_list = [device.get_status() for device in self.devices]
-        
-        response = {
-            "header": self._create_header("discovery_response"),
-            "body": {
-                "devices": devices_list,
-                "available_devices": devices_list  # Alternative key for compatibility
-            },
-            "devices": devices_list,  # Top-level for compatibility
-            "request_id": message.get("request_id")
-        }
-        
-        # Simulate network delay
-        time.sleep(0.3)
-        
-        self.client.publish(reply_topic, json.dumps(response))
-        print(f"[MockServer] Sent discovery response with {len(devices_list)} devices to {reply_topic}")
-    
-    def _handle_query(self, message: Dict, reply_topic: str):
-        """Handle query request with test images."""
-        query_text = message.get("query", "")
-        query_id = message.get("request_id", str(uuid.uuid4()))
-        
-        print(f"[MockServer] Handling query: '{query_text}'")
+    def _handle_discovery_packet(self) -> None:
+        """NUC relay answers discovery from edge/status cache — refresh status now."""
+        print("[MockServer] Discovery request received — refreshing device_status heartbeats")
+        self._publish_all_device_status()
+
+    def _handle_query_request(self, body: Dict, device: MockEdgeDevice) -> None:
+        """Handle query_request packet body for one mock edge device."""
+        query_text = (body.get("query") or "").strip()
+        query_id = body.get("query_id") or str(uuid.uuid4())
+
+        if not self._should_process_query(device.device_name, body):
+            print(
+                f"[MockServer] Skipping query for {device.device_name} "
+                f"(not in target_devices)"
+            )
+            return
+
+        print(f"[MockServer] {device.device_name} handling query: '{query_text}'")
         
         # Match query to response pattern
         match_result = QueryMatcher.match_query(query_text)
@@ -200,16 +260,15 @@ class MockEdgeServer:
             print(f"[MockServer] No matching pattern for query")
             return
         
-        # Mark device as processing
-        self.devices[0].is_processing = True
-        
+        device.is_processing = True
+        self._publish_device_status(device)
+
         # Simulate inference time
         time.sleep(1.0)
-        
-        # Send response images
+
         images = match_result["images"]
         total_chunks = len(images)
-        
+
         for idx, image_name in enumerate(images):
             image_base64 = self._load_image_base64(image_name)
             
@@ -228,7 +287,7 @@ class MockEdgeServer:
                 })
             
             response = {
-                "header": self._create_header("query_response", self.devices[0].device_name),
+                "header": self._create_header("query_response", device.device_name),
                 "body": {
                     "query_id": query_id,
                     "metadata": {
@@ -249,16 +308,18 @@ class MockEdgeServer:
                 "request_id": query_id
             }
             
-            self.client.publish(reply_topic, json.dumps(response))
-            print(f"[MockServer] Sent image {idx + 1}/{total_chunks}: {image_name}")
-            
-            # Small delay between chunks
+            self.client.publish(RESULTS_TOPIC, json.dumps(response))
+            print(
+                f"[MockServer] {device.device_name}: sent image "
+                f"{idx + 1}/{total_chunks} → {RESULTS_TOPIC}"
+            )
+
             if idx < total_chunks - 1:
                 time.sleep(0.2)
-        
-        # Mark device as done processing
-        self.devices[0].is_processing = False
-        print(f"[MockServer] Query complete. Sent {total_chunks} images.")
+
+        device.is_processing = False
+        self._publish_device_status(device)
+        print(f"[MockServer] {device.device_name}: query complete ({total_chunks} images).")
     
     def _on_connect(self, client, userdata, flags, rc):
         """Handle MQTT connection."""
@@ -266,38 +327,43 @@ class MockEdgeServer:
             print(f"[MockServer] Connected to MQTT broker at {self.broker_ip}:{self.broker_port}")
             client.subscribe(self.control_topic)
             print(f"[MockServer] Subscribed to: {self.control_topic}")
+            print(
+                f"[MockServer] Publishing heartbeats to {STATUS_TOPIC} "
+                f"(required for NUC discovery cache)"
+            )
+            self._publish_all_device_status()
+            threading.Thread(target=self._status_loop, daemon=True).start()
         else:
             print(f"[MockServer] Connection failed with code: {rc}")
-    
+
     def _on_message(self, client, userdata, msg):
-        """Handle incoming MQTT messages."""
+        """Handle incoming MQTT messages on edge/control."""
         try:
             payload = json.loads(msg.payload.decode())
         except json.JSONDecodeError:
             print(f"[MockServer] Invalid JSON received on {msg.topic}")
             return
-        
-        print(f"[MockServer] Received message on {msg.topic}")
-        
-        # Get command type
-        command = payload.get("command", "")
-        reply_topic = payload.get("reply_topic", "edge/response")
-        
-        # Handle different commands
-        if command == "discover":
-            threading.Thread(
-                target=self._handle_discovery,
-                args=(payload, reply_topic),
-                daemon=True
-            ).start()
-        elif command == "query":
-            threading.Thread(
-                target=self._handle_query,
-                args=(payload, reply_topic),
-                daemon=True
-            ).start()
+
+        msg_type, body = self._parse_packet(payload)
+        print(f"[MockServer] Received on {msg.topic}: message_type={msg_type!r}")
+
+        if msg_type == "discovery":
+            threading.Thread(target=self._handle_discovery_packet, daemon=True).start()
+            return
+
+        if msg_type == "query_request":
+            for device in self.devices:
+                threading.Thread(
+                    target=self._handle_query_request,
+                    args=(body, device),
+                    daemon=True,
+                ).start()
+            return
+
+        if msg_type:
+            print(f"[MockServer] Ignoring unhandled message_type: {msg_type}")
         else:
-            print(f"[MockServer] Unknown command: {command}")
+            print(f"[MockServer] Unrecognized payload (expected header/body packet)")
     
     def start(self):
         """Start the mock server."""
