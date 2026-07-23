@@ -36,7 +36,7 @@ from PyQt6.QtWidgets import (
 )
 
 # ── constants ─────────────────────────────────────────────────────────────────
-WIN_W, WIN_H  = 1100, 760
+WIN_W, WIN_H  = 1100, 880
 BRAND_BG      = "#1D2BA1"
 # Vertical gap between major blocks inside the Query card (title, targets, chips, …).
 _QUERY_SECTION_GAP = 6
@@ -166,6 +166,28 @@ class PillButton(QPushButton):
         p.fillPath(path, color)
         p.setPen(self._text); p.setFont(self.font())
         p.drawText(rect, Qt.AlignmentFlag.AlignCenter, self.text())
+
+
+# Placeholder entry for "no video file — use the live camera feed".
+_LIVE_CAMERA_LABEL = "◉  Live camera (no video file)"
+
+_VIDEO_COMBO_STYLE = (
+    "QComboBox {"
+    "  background-color: rgba(255,255,255,0.12);"
+    "  border: 1px solid rgba(184,221,255,0.35);"
+    "  border-radius: 8px;"
+    "  padding: 5px 10px;"
+    "  color: #FFFFFF;"
+    "  min-height: 24px;"
+    "}"
+    "QComboBox:disabled { color: rgba(255,255,255,0.40); }"
+    "QComboBox::drop-down { border: none; width: 18px; }"
+    "QComboBox QAbstractItemView {"
+    "  background-color: #FFFFFF;"
+    "  color: #131A5C;"
+    "  selection-background-color: rgba(29,43,161,0.18);"
+    "}"
+)
 
 
 _CHIP_COMBO_STYLE = (
@@ -881,18 +903,20 @@ class MainWindow(QMainWindow):
     _image_ready    = pyqtSignal(str, dict)
     _metadata_ready = pyqtSignal(dict)
     _clear_ready    = pyqtSignal()
+    _videos_ready   = pyqtSignal(dict, dict, dict)
 
     def __init__(self) -> None:
         super().__init__()
         self._image_ready.connect(self._add_image_on_main_thread)
         self._metadata_ready.connect(self._update_metadata_on_main_thread)
         self._clear_ready.connect(self._clear_on_main_thread)
+        self._videos_ready.connect(self._apply_video_catalog_on_main_thread)
 
         # Native OS title bar – logo + descriptive title
         self.setWindowTitle("Query – Sentinel Nexus")
         self.setWindowIcon(_app_icon())
         self.resize(WIN_W, WIN_H)
-        self.setMinimumSize(860, 580)
+        self.setMinimumSize(880, 660)
 
         self._on_query_callback = None
         self._on_auto_resend_changed: Optional[Callable[[bool, int, int], None]] = None
@@ -911,6 +935,18 @@ class MainWindow(QMainWindow):
         self._target_chip_widgets: dict[str, _TargetChip] = {}
         self._model_by_device: dict[str, str] = {}
         self._available_models_by_device: dict[str, list[str]] = {}
+
+        # ── video source state ────────────────────────────────────────────────
+        # Populated from device_status packets: what each edge has in its video
+        # directory, where that directory is, and whether the edge created it.
+        self._videos_by_device: dict[str, list[str]] = {}
+        self._video_dir_by_device: dict[str, str] = {}
+        self._video_dir_created: dict[str, bool] = {}
+        # Devices we have already announced a "directory created" prompt for, so
+        # the message is not re-shown on every 1.5s status packet.
+        self._announced_video_dirs: set[str] = set()
+        self._selected_video: str = ""
+        self._on_videos_refresh_callback: Optional[Callable[[], None]] = None
 
         # ── QoL state ─────────────────────────────────────────────────────────
         # #11 Query history (oldest → newest).
@@ -1021,6 +1057,82 @@ class MainWindow(QMainWindow):
         chips_scroll.setWidget(self._chips_container)
         ql.addWidget(chips_scroll)
         ql.addSpacing(_QUERY_SECTION_GAP)
+
+        # ── Video source region ───────────────────────────────────────────────
+        # Videos are recorded by the camera into the edge device's video
+        # directory; the edge advertises what it has in its device_status
+        # packets and the user picks one to query against here.
+        video_header_row = QHBoxLayout()
+        video_header_row.setSpacing(8)
+
+        video_lbl = QLabel("Video source:")
+        vhf = QFont("Segoe UI", 10); vhf.setWeight(QFont.Weight.Medium)
+        video_lbl.setFont(vhf)
+        video_lbl.setStyleSheet("color: rgba(255,255,255,0.85); background: transparent;")
+        video_header_row.addWidget(video_lbl)
+
+        self.video_scope_lbl = QLabel("")
+        self.video_scope_lbl.setFont(QFont("Segoe UI", 9))
+        self.video_scope_lbl.setStyleSheet(
+            "color: rgba(255,255,255,0.65); background: transparent;"
+        )
+        video_header_row.addWidget(self.video_scope_lbl)
+        video_header_row.addStretch(1)
+
+        self.refresh_videos_btn = QToolButton()
+        self.refresh_videos_btn.setText("⟳  Refresh")
+        self.refresh_videos_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.refresh_videos_btn.setStyleSheet(
+            "QToolButton {"
+            "  background-color: rgba(184,221,255,0.18);"
+            "  color: rgba(255,255,255,0.90);"
+            "  border: 1px solid rgba(184,221,255,0.35);"
+            "  border-radius: 6px;"
+            "  padding: 2px 10px;"
+            "}"
+            "QToolButton:hover { background-color: rgba(184,221,255,0.30); }"
+        )
+        self.refresh_videos_btn.setToolTip(
+            "Ask the edge devices to re-report the contents of their video directory"
+        )
+        self.refresh_videos_btn.clicked.connect(self._on_refresh_videos_clicked)
+        video_header_row.addWidget(self.refresh_videos_btn)
+
+        ql.addLayout(video_header_row)
+        ql.addSpacing(4)
+
+        self.video_combo = QComboBox()
+        self.video_combo.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.video_combo.setFont(QFont("Segoe UI", 11))
+        self.video_combo.setStyleSheet(_VIDEO_COMBO_STYLE)
+        self.video_combo.setMinimumHeight(34)
+        self.video_combo.setToolTip(
+            "Pick a recorded video to build the query from, or keep the live camera feed"
+        )
+        self.video_combo.currentIndexChanged.connect(self._on_video_selection_changed)
+        ql.addWidget(self.video_combo)
+        ql.addSpacing(4)
+
+        # Two prompts: one for the directory, one for its contents.
+        pf_small = QFont("Segoe UI", 9)
+        self.video_dir_lbl = QLabel("")
+        self.video_dir_lbl.setFont(pf_small)
+        self.video_dir_lbl.setWordWrap(True)
+        self.video_dir_lbl.setStyleSheet(
+            "color: rgba(255,255,255,0.60); background: transparent;"
+        )
+        ql.addWidget(self.video_dir_lbl)
+
+        self.video_found_lbl = QLabel("")
+        self.video_found_lbl.setFont(pf_small)
+        self.video_found_lbl.setWordWrap(True)
+        self.video_found_lbl.setStyleSheet(
+            "color: rgba(255,255,255,0.60); background: transparent;"
+        )
+        ql.addWidget(self.video_found_lbl)
+        ql.addSpacing(_QUERY_SECTION_GAP)
+
+        self._rebuild_video_combo()
 
         self.query_input = _HistoryLineEdit(lambda: list(self._query_history))
         self.query_input.setPlaceholderText("Enter query…   (Enter to send · ↑/↓ history)")
@@ -1533,6 +1645,155 @@ class MainWindow(QMainWindow):
                 selected=self.get_selected_model_for_device(device_name),
             )
 
+    # ── video source ──────────────────────────────────────────────────────────
+    def set_videos_refresh_callback(self, callback: Optional[Callable[[], None]]) -> None:
+        """Owner registers what the ⟳ Refresh button should trigger (re-discovery)."""
+        self._on_videos_refresh_callback = callback
+
+    def set_device_video_catalog(
+        self,
+        videos_by_device: Optional[Dict[str, List[str]]] = None,
+        video_dirs: Optional[Dict[str, str]] = None,
+        created_flags: Optional[Dict[str, bool]] = None,
+    ) -> None:
+        """Thread-safe — feed in what each edge reports about its video directory."""
+        self._videos_ready.emit(
+            dict(videos_by_device or {}),
+            dict(video_dirs or {}),
+            dict(created_flags or {}),
+        )
+
+    def selected_video(self) -> Optional[str]:
+        """Video file name the user picked, or None for the live camera feed."""
+        return self._selected_video or None
+
+    def _apply_video_catalog_on_main_thread(
+        self, videos_by_device: dict, video_dirs: dict, created_flags: dict
+    ) -> None:
+        for name, videos in (videos_by_device or {}).items():
+            n = str(name or "").strip()
+            if n and isinstance(videos, list):
+                self._videos_by_device[n] = [str(v) for v in videos if str(v).strip()]
+        for name, path in (video_dirs or {}).items():
+            n = str(name or "").strip()
+            if n and str(path or "").strip():
+                self._video_dir_by_device[n] = str(path).strip()
+        for name, created in (created_flags or {}).items():
+            n = str(name or "").strip()
+            if n:
+                self._video_dir_created[n] = bool(created)
+        self._rebuild_video_combo()
+
+    def _video_scope_devices(self) -> list[str]:
+        """Devices whose videos are offered: the targets, or every known edge."""
+        if self._target_devices:
+            return list(self._target_devices)
+        return sorted(self._videos_by_device.keys())
+
+    def _rebuild_video_combo(self) -> None:
+        """Refresh the picker + both prompts from the current catalog."""
+        scope = self._video_scope_devices()
+
+        # Union of video names across in-scope devices, remembering who has each
+        # so the tooltip can disambiguate a name present on several edges.
+        owners_by_video: dict[str, list[str]] = {}
+        for device in scope:
+            for video in self._videos_by_device.get(device, []):
+                owners_by_video.setdefault(video, []).append(device)
+        videos = sorted(owners_by_video.keys())
+
+        previous = self._selected_video
+        self.video_combo.blockSignals(True)
+        self.video_combo.clear()
+        self.video_combo.addItem(_LIVE_CAMERA_LABEL, "")
+        for video in videos:
+            self.video_combo.addItem(f"🎞  {video}", video)
+            owners = owners_by_video[video]
+            self.video_combo.setItemData(
+                self.video_combo.count() - 1,
+                "On: " + ", ".join(owners),
+                Qt.ItemDataRole.ToolTipRole,
+            )
+        # Keep the previous pick when it survived the refresh.
+        restored = self.video_combo.findData(previous) if previous else 0
+        self.video_combo.setCurrentIndex(restored if restored >= 0 else 0)
+        self.video_combo.blockSignals(False)
+        self._selected_video = str(self.video_combo.currentData() or "")
+
+        self.video_combo.setEnabled(bool(videos))
+        if scope and self._target_devices:
+            n = len(self._target_devices)
+            self.video_scope_lbl.setText(
+                f"on {self._target_devices[0]}" if n == 1 else f"across {n} targeted devices"
+            )
+        elif scope:
+            self.video_scope_lbl.setText("across all edge devices")
+        else:
+            self.video_scope_lbl.setText("")
+
+        self._refresh_video_prompts(scope, videos)
+
+    def _refresh_video_prompts(self, scope: list[str], videos: list[str]) -> None:
+        """Update the directory / videos-found prompt lines."""
+        _dim   = "color: rgba(255,255,255,0.55); background: transparent;"
+        _ok    = "color: rgba(150,235,180,0.95); background: transparent;"
+        _warn  = "color: rgba(255,200,140,0.95); background: transparent;"
+
+        known = [d for d in scope if d in self._video_dir_by_device]
+        if not known:
+            self.video_dir_lbl.setStyleSheet(_dim)
+            self.video_dir_lbl.setText(
+                "Waiting for an edge device to report its video directory…"
+            )
+            self.video_found_lbl.setStyleSheet(_dim)
+            self.video_found_lbl.setText("")
+            return
+
+        # Directory prompt — call out devices where this run created the folder.
+        fresh = [d for d in known if self._video_dir_created.get(d)]
+        self._announced_video_dirs.update(fresh)
+        if fresh:
+            paths = {self._video_dir_by_device[d] for d in fresh}
+            where = ", ".join(fresh)
+            self.video_dir_lbl.setStyleSheet(_ok)
+            self.video_dir_lbl.setText(
+                f"📁  Video directory created on {where} — {' / '.join(sorted(paths))}"
+            )
+        else:
+            paths = {self._video_dir_by_device[d] for d in known}
+            self.video_dir_lbl.setStyleSheet(_dim)
+            self.video_dir_lbl.setText(
+                f"📁  Video directory ready on {len(known)} device(s) — "
+                f"{' / '.join(sorted(paths))}"
+            )
+
+        # Videos-found prompt.
+        if videos:
+            with_videos = [d for d in known if self._videos_by_device.get(d)]
+            self.video_found_lbl.setStyleSheet(_ok)
+            self.video_found_lbl.setText(
+                f"🎞  {len(videos)} video(s) found on {', '.join(with_videos)}"
+            )
+        else:
+            self.video_found_lbl.setStyleSheet(_warn)
+            self.video_found_lbl.setText(
+                "🎞  No videos in the directory yet — queries will use the live camera."
+            )
+
+    def _on_video_selection_changed(self, _index: int) -> None:
+        self._selected_video = str(self.video_combo.currentData() or "")
+
+    def _on_refresh_videos_clicked(self) -> None:
+        cb = self._on_videos_refresh_callback
+        if callable(cb):
+            try:
+                cb()
+            except Exception as exc:
+                print(f"[Query] videos refresh callback error: {exc!r}")
+        else:
+            print("[Query] Refresh clicked — no refresh callback registered")
+        self._rebuild_video_combo()
+
     def set_target_devices(self, devices) -> None:
         """Replace the current target list (broadcast when empty/None)."""
         cleaned: list[str] = []
@@ -1936,7 +2197,9 @@ class MainWindow(QMainWindow):
                 self._on_query_callback(text)
         else:
             tgt_str = (", ".join(targets) if targets else "broadcast")
-            print(f"[Query] Query sent: '{text}' → {tgt_str} — no callback registered")
+            src_str = self._selected_video or "live camera"
+            print(f"[Query] Query sent: '{text}' → {tgt_str} (source: {src_str}) "
+                  f"— no callback registered")
 
     # ── chips / target devices ───────────────────────────────────────────────
     def _rebuild_chips(self) -> None:
@@ -1977,6 +2240,9 @@ class MainWindow(QMainWindow):
             )
         else:
             self.targets_summary_lbl.setText(f"Targeting {n} devices · per-chip models")
+
+        # The offered video list is scoped to the targets, so it moves with them.
+        self._rebuild_video_combo()
 
         if self._on_targets_changed_callback:
             try:

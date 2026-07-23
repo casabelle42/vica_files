@@ -155,6 +155,7 @@ class MQTTHostClient:
         target_devices: list[str] | None = None,
         target_device: str | None = None,
         model: str | None = None,
+        video: str | None = None,
     ):
         query_id = str(query_id or uuid.uuid4())
         # Normalise targets for logging / UI / MQTT body (broadcast when omitted).
@@ -167,6 +168,9 @@ class MQTTHostClient:
             "query_id": query_id,
             "query": str(query or ""),
             **({"model": str(model).strip()} if isinstance(model, str) and str(model).strip() else {}),
+            # Video file name in the edge's video directory; omitted entirely
+            # when the user is querying the live camera feed.
+            **({"video": str(video).strip()} if isinstance(video, str) and str(video).strip() else {}),
         }
         # Non-empty targeting on the wire so edges can filter; omit for broadcast.
         if targets:
@@ -182,7 +186,8 @@ class MQTTHostClient:
         model_log = body.get("model")
         print(
             f"[MQTTHostClient] Queued query_request id={query_id} "
-            f"targets={targets!r} model={model_log!r} topic=host/control"
+            f"targets={targets!r} model={model_log!r} video={body.get('video')!r} "
+            f"topic=host/control"
         )
         return query_id
 
@@ -316,6 +321,7 @@ class HostCommandSender:
         target_devices: list[str] | None = None,
         query_id: str | None = None,
         model: str | None = None,
+        video: str | None = None,
     ):
         """
         Send a query_request packet and return the query_id immediately.
@@ -326,6 +332,7 @@ class HostCommandSender:
             query_id=query_id,
             target_devices=target_devices,
             model=model,
+            video=video,
         )
 
     def close(self):

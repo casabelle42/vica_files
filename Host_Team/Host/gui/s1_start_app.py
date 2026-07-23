@@ -96,7 +96,8 @@ class HostBackend(Protocol):
     def send_query_request(self, query_text: str,
                            target_devices: Optional[List[str]] = None,
                            model: Optional[str] = None,
-                           query_id: Optional[str] = None) -> str: ...
+                           query_id: Optional[str] = None,
+                           video: Optional[str] = None) -> str: ...
 
     # Optional — backends may override; default no-op when absent.
     def close(self) -> None: ...
@@ -134,12 +135,14 @@ class MqttBackend:
     def send_query_request(self, query_text: str,
                            target_devices: Optional[List[str]] = None,
                            model: Optional[str] = None,
-                           query_id: Optional[str] = None) -> str:
+                           query_id: Optional[str] = None,
+                           video: Optional[str] = None) -> str:
         return self._sender.send_query_request(
             query_text,
             target_devices=target_devices,
             model=model,
             query_id=query_id,
+            video=video,
         )
 
     def close(self) -> None:
@@ -166,6 +169,22 @@ def _safe_extract_devices(response: dict) -> list:
         if isinstance(body.get("available_devices"), list):
             return body["available_devices"]
     return []
+
+
+def _copy_video_fields(src: Dict[str, Any], dst: Dict[str, Any]) -> None:
+    """Carry an edge's video directory report into the GUI device dict.
+
+    Emitted by the edge in every device_status packet; the Query window turns
+    these into the video picker and its two prompts.
+    """
+    videos = src.get("available_videos")
+    if isinstance(videos, list):
+        dst["available_videos"] = [str(v) for v in videos if str(v).strip()]
+    vdir = src.get("video_dir")
+    if isinstance(vdir, str) and vdir.strip():
+        dst["video_dir"] = vdir.strip()
+    if "video_dir_created" in src:
+        dst["video_dir_created"] = bool(src.get("video_dir_created"))
 
 
 def _to_gui_devices(raw_devices: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -295,8 +314,18 @@ class UiDispatcher(QObject):
             elif is_stale:
                 stale_note = " • earlier query"
 
+            # Which source produced this frame — the edge echoes back the video
+            # name it actually used (absent when it fell back to the camera).
+            source_video = meta.get("video") if isinstance(meta, dict) else None
+            source_note = (
+                f" • {source_video}" if isinstance(source_video, str) and source_video.strip()
+                else " • live camera"
+            )
+
             gui_metadata = {
-                "image": f"Frame {chunk_index_i + 1}/{total_chunks_i}" + (f" • {image_fingerprint}" if image_fingerprint else ""),
+                "image": f"Frame {chunk_index_i + 1}/{total_chunks_i}"
+                         + (f" • {image_fingerprint}" if image_fingerprint else "")
+                         + source_note,
                 "edge_device": header.get("source_device", "Unknown"),
                 "query": (query_text or "User query") + stale_note,
                 "response": answer_text or ", ".join(det_labels) or "No response text",
@@ -389,6 +418,7 @@ def run_app(backend: HostBackend,
         active = body.get("active_model")
         if isinstance(active, str) and active.strip():
             gui_dev["active_model"] = active.strip()
+        _copy_video_fields(body, gui_dev)
         return gui_dev
 
     def _emit_full_device_list():
@@ -510,6 +540,7 @@ def run_app(backend: HostBackend,
                             active = d.get("active_model")
                             if isinstance(active, str) and active.strip():
                                 dev_entry["active_model"] = active.strip()
+                            _copy_video_fields(d, dev_entry)
                             devices_by_name[name] = dev_entry
                     _emit_full_device_list()
                 return
@@ -676,6 +707,15 @@ def run_app(backend: HostBackend,
             except Exception:
                 model_groups = [(targets, None)]
 
+            # Video source picked in the Query window (None = live camera).
+            selected_video: Optional[str] = None
+            try:
+                qw_video = handler._get_query_window()
+                if qw_video and hasattr(qw_video, "selected_video"):
+                    selected_video = qw_video.selected_video()
+            except Exception:
+                selected_video = None
+
             qid: Optional[str] = None
             for group_targets, group_model in model_groups:
                 qid = backend.send_query_request(
@@ -683,6 +723,7 @@ def run_app(backend: HostBackend,
                     target_devices=group_targets or None,
                     model=group_model,
                     query_id=qid,
+                    video=selected_video,
                 )
 
             with current_query_id_lock:
@@ -705,6 +746,7 @@ def run_app(backend: HostBackend,
             ]
             print(
                 f"[HOST_MAIN] Query request sent (query_id={qid}, targets={targets_str}"
+                f", source={selected_video or 'live camera'}"
                 f"{', models: ' + '; '.join(model_bits) if any(m for _, m in model_groups) else ''})"
             )
             if _auto_resend.get("enabled"):
