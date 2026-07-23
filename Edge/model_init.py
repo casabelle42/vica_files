@@ -313,9 +313,18 @@ class ModelService:
         results = self.run_inference_many(query_text, num_frames=1, timeout_sec=2.0)
         return results[0] if results else {}
 
-    def run_inference_many(self, query_text: str, num_frames: int, timeout_sec: float = 2.0) -> list[Dict[str, Any]]:
+    def run_inference_many(
+        self,
+        query_text: str,
+        num_frames: int,
+        timeout_sec: float = 2.0,
+        video_path: Optional[str] = None,
+    ) -> list[Dict[str, Any]]:
         """
-        Run inference for query_text on up to num_frames camera frames.
+        Run inference for query_text on up to num_frames frames.
+
+        Frames come from the live camera by default, or from ``video_path``
+        (a file in the edge's video directory) when the Host picked one.
         Returns a list of {"frame_id","frame_ts","image","results"} dicts.
         """
         # Guardrails
@@ -326,6 +335,9 @@ class ModelService:
         n = max(1, min(n, 10))  # keep it reasonable
 
         self.model.set_query(query_text)
+
+        if video_path:
+            return self._run_inference_on_video(video_path, n)
 
         out: list[Dict[str, Any]] = []
         deadline = time.time() + float(timeout_sec)
@@ -348,3 +360,47 @@ class ModelService:
             )
 
         return out
+
+    def _run_inference_on_video(self, video_path: str, n: int) -> list[Dict[str, Any]]:
+        """Sample n frames spread evenly across a recorded video and infer on each.
+
+        No timeout here: unlike the camera queue, the file is already on disk,
+        so the only cost is decode + inference for exactly n frames.
+        """
+        cap = cv2.VideoCapture(video_path)
+        if not cap.isOpened():
+            print(f"[video] failed to open {video_path}")
+            return []
+
+        try:
+            total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+            fps = float(cap.get(cv2.CAP_PROP_FPS) or 0.0)
+            # Evenly spaced sample points; fall back to sequential reads when the
+            # container does not report a frame count (common for some MP4s).
+            if total > 0:
+                targets = [int(i * total / (n + 1)) for i in range(1, n + 1)]
+            else:
+                targets = list(range(n))
+
+            out: list[Dict[str, Any]] = []
+            for frame_index in targets:
+                if total > 0:
+                    cap.set(cv2.CAP_PROP_POS_FRAMES, frame_index)
+                ok, frame = cap.read()
+                if not ok:
+                    break
+                result = self.model.infer(frame)
+                out.append(
+                    {
+                        "frame_id": frame_index,
+                        # No wall-clock timestamp for a recording — the handler
+                        # stamps these with the processing time instead.
+                        "frame_ts": None,
+                        "video_offset_sec": round(frame_index / fps, 3) if fps > 0 else None,
+                        "image": encode_jpeg_b64(frame),
+                        "results": result.get("summary", ""),
+                    }
+                )
+            return out
+        finally:
+            cap.release()

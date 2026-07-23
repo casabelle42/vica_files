@@ -178,6 +178,10 @@ class MainWindow(QMainWindow):
         self._selected_devices: set[str]   = set()
         # Per-device model selection (placeholders until Jetsons report models).
         self._selected_model_by_device: dict[str, str] = {}
+        # Per-device video directory inventory, as reported in device_status.
+        self._videos_by_device: dict[str, list[str]] = {}
+        self._video_dir_by_device: dict[str, str] = {}
+        self._video_dir_created: dict[str, bool] = {}
 
         # ── root ──────────────────────────────────────────────────────────────
         root = QWidget()
@@ -305,6 +309,7 @@ class MainWindow(QMainWindow):
 
     def update_devices(self, devices: list):
         self.devices = devices
+        self._absorb_video_info(devices)
         for wd in self.device_widgets.values():
             wd["row"].setParent(None); wd["row"].deleteLater()
         self.device_widgets.clear()
@@ -321,6 +326,7 @@ class MainWindow(QMainWindow):
         self.devices_panel.adjustSize()
         self.devices_panel.update()
         self._sync_models_to_query_window()
+        self._sync_videos_to_query_window()
 
     def selected_devices(self) -> list[str]:
         """Return the current set of devices the user has marked as targets."""
@@ -360,6 +366,45 @@ class MainWindow(QMainWindow):
             if isinstance(combo, QComboBox):
                 catalog[name] = [combo.itemText(i) for i in range(combo.count())]
         return catalog
+
+    # ── video directory inventory ─────────────────────────────────────────────
+    def _absorb_video_info(self, devices: list) -> None:
+        """Pull video directory fields out of the device dicts from device_status."""
+        for d in devices or []:
+            if not isinstance(d, dict):
+                continue
+            name = str(d.get("name") or "").strip()
+            if not name:
+                continue
+            videos = d.get("available_videos")
+            if isinstance(videos, list):
+                self._videos_by_device[name] = [
+                    str(v).strip() for v in videos if str(v).strip()
+                ]
+            vdir = d.get("video_dir")
+            if isinstance(vdir, str) and vdir.strip():
+                self._video_dir_by_device[name] = vdir.strip()
+            if "video_dir_created" in d:
+                self._video_dir_created[name] = bool(d.get("video_dir_created"))
+
+    def videos_by_device(self) -> dict[str, list[str]]:
+        return {k: list(v) for k, v in self._videos_by_device.items()}
+
+    def video_dirs_by_device(self) -> dict[str, str]:
+        return dict(self._video_dir_by_device)
+
+    def _sync_videos_to_query_window(self) -> None:
+        qw = self._query_window
+        if qw is None or not hasattr(qw, "set_device_video_catalog"):
+            return
+        try:
+            qw.set_device_video_catalog(
+                self.videos_by_device(),
+                self.video_dirs_by_device(),
+                dict(self._video_dir_created),
+            )
+        except Exception as exc:
+            print(f"[AvailableDevices] Failed to sync videos to query window: {exc!r}")
 
     def _sync_models_to_query_window(self) -> None:
         qw = self._query_window
@@ -472,7 +517,12 @@ class MainWindow(QMainWindow):
                 self._query_window.set_targets_changed_callback(self.set_selected_devices)
             if hasattr(self._query_window, "set_models_changed_callback"):
                 self._query_window.set_models_changed_callback(self.set_selected_model_for_device)
+            # The Query window's ⟳ Refresh re-runs discovery so edges re-report
+            # their video directories.
+            if hasattr(self._query_window, "set_videos_refresh_callback"):
+                self._query_window.set_videos_refresh_callback(self._on_discover_clicked)
             self._sync_models_to_query_window()
+            self._sync_videos_to_query_window()
             self._query_window.show()
         else:
             if self._on_query_callback and hasattr(self._query_window, "set_query_callback"):
@@ -487,7 +537,10 @@ class MainWindow(QMainWindow):
                 self._query_window.set_targets_changed_callback(self.set_selected_devices)
             if hasattr(self._query_window, "set_models_changed_callback"):
                 self._query_window.set_models_changed_callback(self.set_selected_model_for_device)
+            if hasattr(self._query_window, "set_videos_refresh_callback"):
+                self._query_window.set_videos_refresh_callback(self._on_discover_clicked)
             self._sync_models_to_query_window()
+            self._sync_videos_to_query_window()
             self._query_window.raise_()
             self._query_window.activateWindow()
 

@@ -9,6 +9,7 @@ import uuid
 from datetime import datetime
 import platform
 from model_init import ModelService, CFG
+from video_store import ensure_video_dir, list_videos, resolve_video
 
 
 def edge_device_name() -> str:
@@ -47,6 +48,16 @@ class EdgeHandler:
         self._status_thread = None
 
         self.logger.info("Initializing EdgeHandler...")
+
+        # Video directory: created here so the camera has somewhere to record to
+        # before any query arrives. The Host is told the path and whether this
+        # run created it, so it can prompt the user.
+        self.video_dir, self.video_dir_created = ensure_video_dir()
+        if self.video_dir_created:
+            self.logger.info(f"Created video directory: {self.video_dir}")
+        else:
+            self.logger.info(f"Using existing video directory: {self.video_dir}")
+
         self._start_model_container()
         self._start_status_thread()
 
@@ -290,7 +301,11 @@ class EdgeHandler:
                         "network_strength": -60,  # Placeholder
                         "isProcessing": (self.model_service and not self.model_service.paused) if self.model_service else False,
                         "available_models": available_models,
-                        "active_model": active_model
+                        "active_model": active_model,
+                        # Video source inventory — drives the Host's video picker.
+                        "video_dir": str(self.video_dir),
+                        "video_dir_created": bool(self.video_dir_created),
+                        "available_videos": list_videos(),
                     }
                     device_status_packet = self._create_packet("device_status", device_status_body)
 
@@ -410,7 +425,20 @@ class EdgeHandler:
                 )
                 return None
 
-            self.logger.info(f"Processing query_request (query_id={query_id}): {query_text}")
+            # Optional video source picked in the Host GUI. Unknown names fall
+            # back to the live camera rather than failing the whole query.
+            video_name = body.get("video")
+            video_path = resolve_video(video_name)
+            if video_name and not video_path:
+                self.logger.warning(
+                    f"Requested video {video_name!r} not found in {self.video_dir} — using live camera."
+                )
+                video_name = None
+
+            source_note = f"video={video_name!r}" if video_path else "source=live camera"
+            self.logger.info(
+                f"Processing query_request (query_id={query_id}, {source_note}): {query_text}"
+            )
             self.model_service.paused = False  # resume inference
 
             try:
@@ -419,6 +447,7 @@ class EdgeHandler:
                     query_text,
                     num_frames=getattr(CFG, "RETURN_FRAMES", 1),
                     timeout_sec=inference_timeout_sec(),
+                    video_path=str(video_path) if video_path else None,
                 )
 
                 if not isinstance(result_list, list) or len(result_list) == 0:
@@ -479,6 +508,8 @@ class EdgeHandler:
                             "image_base64": image_base64,
                             "chunk_index": int(chunk_index),
                             "total_chunks": int(total_chunks),
+                            "source": "video" if video_path else "camera",
+                            "video": video_name if video_path else None,
                         },
                         "frame": {
                             "frame_id": int(frame_id)
