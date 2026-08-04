@@ -42,11 +42,12 @@ Host discovery chip name must match this string exactly for **targeted** queries
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
-| `VICA_MQTT_BROKER` | `10.148.0.95` | NUC MQTT broker |
+| `VICA_MQTT_BROKER` | `10.148.1.64` | NUC MQTT broker |
 | `VICA_MQTT_PORT` | `1883` | Broker port |
 | `AUTO_START_CONTAINER` | `0` | Set `1` to try Docker `nano-vlm` |
 | `VICA_INFERENCE_TIMEOUT_SEC` | `60` | Query inference wait |
-| `CAMERA_GSTREAMER` | (empty) | Jetson camera pipeline |
+| `CAMERA_INDEX` | `0` | OpenCV index when not using GStreamer |
+| `CAMERA_GSTREAMER` | (empty) | Jetson CSI pipeline (preferred on Orin/Thor) |
 | `MODEL_ID` | `nvidia/Cosmos-Reason1-7B` | Hugging Face model |
 
 ## Deploy from Git (Windows → Jetsons)
@@ -73,6 +74,8 @@ chmod +x start_client.sh
 |---------|-----|
 | `edge/EdgeDevice/control` in log | Old `client.py` — `git pull` or copy from repo |
 | Targeted query timeout, broadcast OK | Wrong subscribe topic or second `client.py` process — `pkill -f client.py`, restart `./start_client.sh` |
+| `no frame/results` / camera unavailable | Camera open failed — set `CAMERA_GSTREAMER` for CSI, or free `/dev/video*`; confirm `[camera] opened` in logs |
+| MQTT drops during long queries | Fixed by running inference off the MQTT callback thread — update `client.py` |
 | `ModuleNotFoundError: psutil` | `pip install -r requirements.txt` in the same env as `python3 client.py` |
 | NumPy / SciPy `Inf` import error | `pip install "numpy>=1.24,<2" scipy` inside `.venv` (not system scipy + numpy 2.x) |
 | `AutoModelForVision2Seq` missing | Use current `model_init.py` (ImageTextToText fallback) |

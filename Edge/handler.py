@@ -292,6 +292,8 @@ class EdgeHandler:
                         "available_models": available_models,
                         "active_model": active_model
                     }
+                    if self.model_service and hasattr(self.model_service, "camera_health"):
+                        device_status_body.update(self.model_service.camera_health())
                     device_status_packet = self._create_packet("device_status", device_status_body)
 
                     # Create container_status packet
@@ -422,27 +424,33 @@ class EdgeHandler:
                 )
 
                 if not isinstance(result_list, list) or len(result_list) == 0:
-                    self.logger.warning("No valid results from inference.")
-                    # Emit an explicit error response so the Host doesn't wait forever.
-                    error_body = {
-                        "query_id": query_id,
-                        "metadata": {},
-                        "answer": "Edge inference returned no frame/results. Camera may be unavailable on this device.",
-                        "frame": {
-                            "frame_id": 0,
-                            "timestamp": datetime.now().isoformat(),
-                            "detections": [
-                                {
-                                    "label": "no_results",
-                                    "confidence": 0.0,
-                                    "dets": ["No valid results from inference (likely no camera frames)."]
-                                }
-                            ]
-                        }
-                    }
-                    error_packet = self._create_packet("query_response", error_body)
-                    if self.on_update_callback:
-                        self.on_update_callback("query_response", error_packet)
+                    health = {}
+                    if hasattr(self.model_service, "camera_health"):
+                        try:
+                            health = self.model_service.camera_health() or {}
+                        except Exception:
+                            health = {}
+                    cam_open = health.get("camera_open")
+                    cam_err = health.get("camera_error")
+                    age = health.get("camera_last_frame_age_sec")
+                    if cam_open is False:
+                        detail = (
+                            f"Camera unavailable on this device"
+                            + (f" ({cam_err})" if cam_err else "")
+                            + ". Check CAMERA_INDEX / CAMERA_GSTREAMER and that no other process holds the camera."
+                        )
+                    elif age is None:
+                        detail = (
+                            "Edge inference returned no frame/results. "
+                            "Camera opened but no frames arrived before timeout."
+                        )
+                    else:
+                        detail = (
+                            "Edge inference returned no frame/results. "
+                            f"Last frame was {age}s ago; camera may be stalled."
+                        )
+                    self.logger.warning(f"No valid results from inference: {detail} health={health}")
+                    self._emit_query_response(query_id, detail, status="error")
                     return
 
                 total_chunks = len(result_list)
@@ -506,25 +514,7 @@ class EdgeHandler:
                 self.logger.error(f"Error processing query: {e}")
                 import traceback
                 traceback.print_exc()
-                # Return error in query_response format
-                error_body = {
-                    "query_id": query_id,
-                    "metadata": {},
-                    "frame": {
-                        "frame_id": 0,
-                        "timestamp": datetime.now().isoformat(),
-                        "detections": [
-                            {
-                                "label": f"Error: {str(e)}",
-                                "confidence": 0.0,
-                                "dets": []
-                            }
-                        ]
-                    }
-                }
-                error_packet = self._create_packet("query_response", error_body)
-                if self.on_update_callback:
-                    self.on_update_callback("query_response", error_packet)
+                self._emit_query_response(query_id, f"Edge inference error: {e}", status="error")
                 return
         
         # Unknown message type
@@ -550,6 +540,8 @@ class EdgeHandler:
         if self.model_service:
             try:
                 self.model_service.paused = True
+                if hasattr(self.model_service, "shutdown"):
+                    self.model_service.shutdown()
                 self.logger.info("Model paused successfully.")
             except Exception as e:
                 self.logger.warning(f"Error while stopping model: {e}")

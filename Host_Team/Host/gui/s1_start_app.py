@@ -375,6 +375,13 @@ def run_app(backend: HostBackend,
             meta_bits.append(f"GPU {body['gpu']:.1f}%")
         if is_proc is True:
             meta_bits.append("Processing")
+        if body.get("camera_open") is False:
+            meta_bits.append("Camera OFF")
+            cam_err = body.get("camera_error")
+            if isinstance(cam_err, str) and cam_err.strip():
+                meta_bits.append(cam_err.strip()[:48])
+        elif body.get("camera_open") is True:
+            meta_bits.append("Camera OK")
         metadata = " • ".join(meta_bits) if meta_bits else "N/A"
 
         gui_dev = {
@@ -496,6 +503,10 @@ def run_app(backend: HostBackend,
                                 meta_bits.append(f"GPU {d['gpu']:.1f}%")
                             if d.get("isProcessing") is True:
                                 meta_bits.append("Processing")
+                            if d.get("camera_open") is False:
+                                meta_bits.append("Camera OFF")
+                            elif d.get("camera_open") is True:
+                                meta_bits.append("Camera OK")
                             metadata = " • ".join(meta_bits) if meta_bits else "N/A"
 
                             dev_entry = {
