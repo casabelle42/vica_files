@@ -172,6 +172,11 @@ def _strip_assistant(text: str) -> str:
 # ========= Camera worker =========
 
 class CameraWorker(threading.Thread):
+    """Continuously capture frames; reopen the device on failure instead of exiting."""
+
+    OPEN_RETRY_SEC = 2.0
+    MAX_CONSECUTIVE_READ_FAILS = 30
+
     def __init__(self, cam_index: int, out_q: queue.Queue):
         super().__init__(daemon=True)
         self.cam_index = cam_index
@@ -179,40 +184,129 @@ class CameraWorker(threading.Thread):
         self.stop_ev = threading.Event()
         self.cap = None
         self._frame_id = 0
+        self._lock = threading.Lock()
+        self._opened = False
+        self._last_frame_ts: Optional[float] = None
+        self._last_error: str = ""
 
-    def run(self):
+    @property
+    def is_open(self) -> bool:
+        with self._lock:
+            return self._opened
+
+    @property
+    def last_frame_age_sec(self) -> Optional[float]:
+        with self._lock:
+            if self._last_frame_ts is None:
+                return None
+            return max(0.0, time.time() - self._last_frame_ts)
+
+    @property
+    def last_error(self) -> str:
+        with self._lock:
+            return self._last_error
+
+    def _set_state(self, *, opened: bool, error: str = "", frame_ts: Optional[float] = None):
+        with self._lock:
+            self._opened = opened
+            if error:
+                self._last_error = error
+            elif opened:
+                self._last_error = ""
+            if frame_ts is not None:
+                self._last_frame_ts = frame_ts
+
+    def _open_capture(self):
+        if self.cap is not None:
+            try:
+                self.cap.release()
+            except Exception:
+                pass
+            self.cap = None
+
         if CFG.CAMERA_GSTREAMER:
             # Prefer explicit pipeline when provided (common for Jetson CSI cameras)
             self.cap = cv2.VideoCapture(CFG.CAMERA_GSTREAMER, cv2.CAP_GSTREAMER)
+            src = "gstreamer pipeline"
         else:
             self.cap = cv2.VideoCapture(self.cam_index)
-        if not self.cap.isOpened():
-            src = "gstreamer pipeline" if CFG.CAMERA_GSTREAMER else f"index {self.cam_index}"
-            print(f"[camera] failed to open camera ({src}).")
-            return
+            src = f"index {self.cam_index}"
+
+        if self.cap is None or not self.cap.isOpened():
+            self._set_state(opened=False, error=f"failed to open camera ({src})")
+            print(f"[camera] {self.last_error}. Will retry.")
+            return False
+
+        self._set_state(opened=True)
+        print(f"[camera] opened ({src})")
+        return True
+
+    def _drain_stale_frames(self):
+        # Keep only the most recent frame to avoid stale frames being reused
+        # across multiple queries when the consumer is slower than the camera.
+        while True:
+            try:
+                self.out_q.get_nowait()
+            except queue.Empty:
+                break
+
+    def run(self):
+        consecutive_read_fails = 0
         while not self.stop_ev.is_set():
+            if not self.is_open:
+                if not self._open_capture():
+                    self.stop_ev.wait(self.OPEN_RETRY_SEC)
+                    continue
+                consecutive_read_fails = 0
+
             ok, frame = self.cap.read()
             if ok:
+                consecutive_read_fails = 0
                 self._frame_id += 1
                 frame_ts = time.time()
-                # Keep only the most recent frame to avoid stale frames being reused
-                # across multiple queries when the consumer is slower than the camera.
-                while not self.out_q.empty():
-                    try:
-                        self.out_q.get_nowait()
-                    except Exception:
-                        break
+                self._drain_stale_frames()
                 try:
                     # Store (frame_id, timestamp, frame_bgr)
                     self.out_q.put_nowait((self._frame_id, frame_ts, frame))
-                except Exception:
+                    self._set_state(opened=True, frame_ts=frame_ts)
+                except queue.Full:
                     pass
+            else:
+                consecutive_read_fails += 1
+                if consecutive_read_fails >= self.MAX_CONSECUTIVE_READ_FAILS:
+                    self._set_state(
+                        opened=False,
+                        error=f"camera read failed {consecutive_read_fails} times; reopening",
+                    )
+                    print(f"[camera] {self.last_error}")
+                    consecutive_read_fails = 0
+                    try:
+                        if self.cap is not None:
+                            self.cap.release()
+                    except Exception:
+                        pass
+                    self.cap = None
+                    self.stop_ev.wait(self.OPEN_RETRY_SEC)
+                    continue
             time.sleep(CFG.FRAME_INTERVAL_SEC)
+
+        try:
+            if self.cap is not None:
+                self.cap.release()
+        except Exception:
+            pass
+        self.cap = None
+        self._set_state(opened=False)
 
     def stop(self):
         self.stop_ev.set()
         if self.cap:
-            self.cap.release()
+            try:
+                self.cap.release()
+            except Exception:
+                pass
+            self.cap = None
+        self._set_state(opened=False)
 
 # ========= Utility =========
 
@@ -244,6 +338,16 @@ class ModelService:
         self.model = NanoVLM()
         self.frames: queue.Queue = queue.Queue(maxsize=5)
         self.cam_worker = CameraWorker(CFG.CAMERA_INDEX, self.frames)
+
+    def camera_health(self) -> Dict[str, Any]:
+        """Snapshot used by handler status + clearer no-frame errors."""
+        age = self.cam_worker.last_frame_age_sec
+        return {
+            "camera_open": bool(self.cam_worker.is_open),
+            "camera_last_frame_age_sec": None if age is None else round(float(age), 2),
+            "camera_error": self.cam_worker.last_error or None,
+            "frames_queued": int(self.frames.qsize()),
+        }
 
     # -------------------------
     # Pause / resume
@@ -344,10 +448,14 @@ class ModelService:
 
         while len(out) < n and time.time() < deadline:
             try:
-                remaining = max(0.01, deadline - time.time())
+                remaining = max(0.05, deadline - time.time())
                 frame_id, frame_ts, frame = self.frames.get(timeout=remaining)
             except queue.Empty:
-                break
+                # No frame within this wait slice. If the camera is reconnecting,
+                # keep waiting until the overall deadline; otherwise stop.
+                if out or self.cam_worker.is_open:
+                    break
+                continue
 
             result = self.model.infer(frame)
             out.append(

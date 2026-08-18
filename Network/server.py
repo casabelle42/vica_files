@@ -27,7 +27,23 @@ EDGE_STATUS = "edge/status"
 
 VERBOSE = os.environ.get("VICA_NUC_VERBOSE", "0").strip() not in ("0", "", "false", "False", "no", "No")
 
-device_cache = {}  
+device_cache = {}
+# Drop stale edge entries so discovery does not accumulate ghosts forever.
+DEVICE_CACHE_TTL_SEC = float(os.environ.get("VICA_DEVICE_CACHE_TTL_SEC", "300"))
+
+
+def prune_device_cache(now=None) -> None:
+    """Remove edges that have not heartbeated within DEVICE_CACHE_TTL_SEC."""
+    now = time.time() if now is None else float(now)
+    stale = [
+        name
+        for name, entry in device_cache.items()
+        if (now - float(entry.get("last_seen", 0))) > DEVICE_CACHE_TTL_SEC
+    ]
+    for name in stale:
+        device_cache.pop(name, None)
+        if VERBOSE:
+            print(f"[NUC] Pruned stale device_cache entry: {name}")
 
 
 def safe_json(payload: bytes):
@@ -56,6 +72,7 @@ def make_discovery_response(server_name: str = "NUC"):
     # Build the list in the format your Host expects
     devices = []
     now = time.time()
+    prune_device_cache(now)
 
     for name, entry in device_cache.items():
         body = entry["body"]
@@ -69,6 +86,16 @@ def make_discovery_response(server_name: str = "NUC"):
             "gpu": body.get("gpu", 0.0),
             "network_strength": body.get("network_strength", -100),
             "isProcessing": body.get("isProcessing", False),
+            **(
+                {"camera_open": body["camera_open"]}
+                if "camera_open" in body
+                else {}
+            ),
+            **(
+                {"camera_error": body["camera_error"]}
+                if body.get("camera_error")
+                else {}
+            ),
         })
 
     return {

@@ -21,7 +21,8 @@ class MQTTHostClient:
         self.device_status_cache = {}
 
         self.outgoing_queue = queue.Queue()
-        self.incoming_queue = queue.Queue()
+        # Bounded ring buffer — GUI uses on_packet; this must not grow forever.
+        self.incoming_queue = queue.Queue(maxsize=256)
 
         # Non-destructive "latest packet" cache for request/response style usage.
         self._last_by_type = {}
@@ -34,9 +35,11 @@ class MQTTHostClient:
         # Background publisher loop management
         self._publisher_stop = threading.Event()
         self._publisher_thread = None
+        self._started = False
 
         self.mqtt_client = mqtt.Client()
         self.mqtt_client.on_connect = self._on_mqtt_connect
+        self.mqtt_client.on_disconnect = self._on_mqtt_disconnect
         self.mqtt_client.on_message = self._on_mqtt_message
 
     def _on_mqtt_connect(self, client, userdata, flags, rc):
@@ -59,12 +62,34 @@ class MQTTHostClient:
         else:
             print(f"[MQTTHostClient] Connection failed rc={rc}")
 
+    def _on_mqtt_disconnect(self, client, userdata, rc):
+        if rc != 0:
+            print(f"[MQTTHostClient] Unexpected disconnect rc={rc}; paho will auto-reconnect")
+        else:
+            print("[MQTTHostClient] Disconnected from broker")
+
+    def _enqueue_incoming(self, pkt):
+        """Keep a bounded recent-history buffer without blocking the MQTT thread."""
+        try:
+            self.incoming_queue.put_nowait(pkt)
+            return
+        except queue.Full:
+            pass
+        try:
+            self.incoming_queue.get_nowait()
+        except queue.Empty:
+            pass
+        try:
+            self.incoming_queue.put_nowait(pkt)
+        except queue.Full:
+            pass
+
     def _on_mqtt_message(self, client, userdata, msg):
         try:
             payload_str = msg.payload.decode()
             print(f"[MQTTHostClient] Received on {msg.topic}: {payload_str[:300]}")
             pkt = json.loads(payload_str)
-            self.incoming_queue.put(pkt)
+            self._enqueue_incoming(pkt)
             self._handle_incoming(pkt)
         except Exception as e:
             print(f"[MQTTHostClient] Error handling message: {e}")
@@ -121,13 +146,31 @@ class MQTTHostClient:
         with self._last_lock:
             return self._last_by_type.get(message_type)
 
-    def wait_for_message_type(self, message_type: str, timeout: float = 10.0):
-        """Wait for a packet with given message_type (non-destructive)."""
+    def clear_last(self, message_type: str):
+        """Drop a cached packet so the next wait does not return a stale reply."""
+        with self._last_cv:
+            self._last_by_type.pop(message_type, None)
+
+    def wait_for_message_type(
+        self,
+        message_type: str,
+        timeout: float = 10.0,
+        *,
+        clear_existing: bool = True,
+    ):
+        """Wait for a packet with given message_type (non-destructive).
+
+        By default clears any prior cached packet so callers do not get a
+        stale discovery/query response from an earlier request.
+        """
         deadline = time.time() + float(timeout)
         with self._last_cv:
-            existing = self._last_by_type.get(message_type)
-            if existing is not None:
-                return existing
+            if clear_existing:
+                self._last_by_type.pop(message_type, None)
+            else:
+                existing = self._last_by_type.get(message_type)
+                if existing is not None:
+                    return existing
 
             while True:
                 remaining = deadline - time.time()
@@ -208,12 +251,18 @@ class MQTTHostClient:
         print(f"[MQTTHostClient] Queued command: {command}")
 
     def _publish_outgoing(self):
-        while not self.outgoing_queue.empty():
-            topic, packet = self.outgoing_queue.get()
+        while True:
+            try:
+                topic, packet = self.outgoing_queue.get_nowait()
+            except queue.Empty:
+                break
             try:
                 payload = json.dumps(packet, separators=(",", ":"), ensure_ascii=False)
-                self.mqtt_client.publish(topic, payload)
-                print(f"[MQTTHostClient] Published to {topic}: {payload[:200]}")
+                result = self.mqtt_client.publish(topic, payload)
+                if getattr(result, "rc", 0) != 0:
+                    print(f"[MQTTHostClient] Publish rc={result.rc} topic={topic}")
+                else:
+                    print(f"[MQTTHostClient] Published to {topic}: {payload[:200]}")
             except Exception as e:
                 print(f"[MQTTHostClient] Error publishing: {e}")
 
@@ -224,6 +273,7 @@ class MQTTHostClient:
         try:
             self.mqtt_client.connect_async(self.mqtt_broker, self.mqtt_port, 60)
             self.mqtt_client.loop_start()
+            self._started = True
         except Exception as e:
             print(f"[MQTTHostClient] Failed to start MQTT loop: {e!r}")
 
@@ -245,8 +295,20 @@ class MQTTHostClient:
         print("[MQTTHostClient] Background publisher started.")
 
     def stop_background(self):
-        """Stop background publisher loop (MQTT loop keeps running)."""
+        """Stop background publisher and MQTT network loop (no socket leaks)."""
         self._publisher_stop.set()
+        if self._publisher_thread and self._publisher_thread.is_alive():
+            self._publisher_thread.join(timeout=2.0)
+        if self._started:
+            try:
+                self.mqtt_client.loop_stop()
+            except Exception:
+                pass
+            try:
+                self.mqtt_client.disconnect()
+            except Exception:
+                pass
+            self._started = False
 
     def start(self):
         """Single entry point — connect once, loop forever."""
@@ -254,6 +316,7 @@ class MQTTHostClient:
         try:
             self.mqtt_client.connect_async(self.mqtt_broker, self.mqtt_port, 60)
             self.mqtt_client.loop_start()
+            self._started = True
         except Exception as e:
             print(f"[MQTTHostClient] Failed to start MQTT loop: {e!r}")
         print("[MQTTHostClient] Listening for messages...")
@@ -263,6 +326,8 @@ class MQTTHostClient:
                 time.sleep(0.05)
         except KeyboardInterrupt:
             print("[MQTTHostClient] Stopped.")
+        finally:
+            self.stop_background()
 
 
 class HostCommandSender:
