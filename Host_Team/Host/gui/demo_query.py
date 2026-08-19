@@ -63,6 +63,8 @@ _DESCRIPTIONS = [
 #   status (lowercase)      → "Online" / "Offline"
 #   network_strength (dBm)  → "Strong" / "Medium" / "Weak"
 #   cpu, ram, gpu (percent) → "CPU 18.0% • RAM 42.0%"
+#   available_videos / video_dir / video_dir_created
+#                           → the Query window's video picker + its prompts
 DUMMY_DEVICES: List[dict] = [
     {
         "name": "Demo-Camera-Lobby",
@@ -71,6 +73,13 @@ DUMMY_DEVICES: List[dict] = [
         "cpu": 18.0,
         "ram": 42.0,
         "gpu": 8.0,
+        "video_dir": "/opt/LAS-VICA/videos",
+        "video_dir_created": True,  # exercises the "directory created" prompt
+        "available_videos": [
+            "cam1/lobby_2026-07-21_0900.mp4",
+            "cam2/lobby_2026-07-21_1400.mp4",
+            "loose_clip.mp4",          # a root-level clip
+        ],
     },
     {
         "name": "Demo-Camera-Hallway",
@@ -79,6 +88,9 @@ DUMMY_DEVICES: List[dict] = [
         "cpu": 31.0,
         "ram": 56.0,
         "gpu": 14.0,
+        "video_dir": "/opt/LAS-VICA/videos",
+        "video_dir_created": False,
+        "available_videos": ["cam3/hallway_overnight.mkv"],
     },
     {
         "name": "Demo-Sensor-ServerRoom",
@@ -86,6 +98,9 @@ DUMMY_DEVICES: List[dict] = [
         "network_strength": -52,    # Strong
         "cpu": 12.0,
         "ram": 38.0,
+        "video_dir": "/opt/LAS-VICA/videos",
+        "video_dir_created": False,
+        "available_videos": [],     # exercises the "no videos yet" prompt
     },
     {
         "name": "Demo-Camera-Parking",
@@ -93,6 +108,9 @@ DUMMY_DEVICES: List[dict] = [
         "network_strength": -82,    # Weak
         "cpu": 8.0,
         "ram": 22.0,
+        "video_dir": "/opt/LAS-VICA/videos",
+        "video_dir_created": False,
+        "available_videos": ["cam4/parking_gate_cam.mp4"],
     },
 ]
 
@@ -161,17 +179,20 @@ class DemoBackend:
     def send_query_request(self, query_text: str,
                            target_devices: Optional[List[str]] = None,
                            model: Optional[str] = None,
-                           query_id: Optional[str] = None) -> str:
+                           query_id: Optional[str] = None,
+                           video: Optional[str] = None) -> str:
         query_id = query_id or f"demo-{uuid.uuid4().hex[:8]}"
         targets = [t for t in (target_devices or []) if isinstance(t, str) and t.strip()]
         model_note = f", model={model!r}" if model else ""
+        if video:
+            model_note += f", video={video!r}"
 
         if not targets:
             # Broadcast — single response from a generic source name.
             threading.Timer(
                 self.QUERY_FIRST_DELAY_SEC,
                 self._emit_query_response,
-                args=("demo-edge-01", query_text, query_id),
+                args=("demo-edge-01", query_text, query_id, video),
             ).start()
             print(f"[DEMO] Queued broadcast query_response (query_id={query_id}{model_note})")
             return query_id
@@ -179,7 +200,7 @@ class DemoBackend:
         for i, target in enumerate(targets):
             delay = self.QUERY_FIRST_DELAY_SEC + i * self.QUERY_PER_TARGET_GAP_SEC
             threading.Timer(
-                delay, self._emit_query_response, args=(target, query_text, query_id)
+                delay, self._emit_query_response, args=(target, query_text, query_id, video)
             ).start()
         print(f"[DEMO] Queued {len(targets)} fake response(s) for "
               f"query_id={query_id}{model_note} → {', '.join(targets)}")
@@ -218,7 +239,8 @@ class DemoBackend:
         return pkt
 
     def _emit_query_response(self, source_device: str,
-                             query_text: str, query_id: str) -> None:
+                             query_text: str, query_id: str,
+                             video: Optional[str] = None) -> None:
         r = random.randint(40, 220)
         g = random.randint(40, 220)
         b = random.randint(40, 220)
@@ -240,6 +262,9 @@ class DemoBackend:
                     "image_base64": image_b64,
                     "chunk_index":  0,
                     "total_chunks": 1,
+                    # Echo the source back like a real edge does.
+                    "source": "video" if video else "camera",
+                    "video": video or None,
                 },
                 "frame": {"detections": []},
             },

@@ -172,6 +172,11 @@ def _strip_assistant(text: str) -> str:
 # ========= Camera worker =========
 
 class CameraWorker(threading.Thread):
+    """Continuously capture frames; reopen the device on failure instead of exiting."""
+
+    OPEN_RETRY_SEC = 2.0
+    MAX_CONSECUTIVE_READ_FAILS = 30
+
     def __init__(self, cam_index: int, out_q: queue.Queue):
         super().__init__(daemon=True)
         self.cam_index = cam_index
@@ -179,40 +184,129 @@ class CameraWorker(threading.Thread):
         self.stop_ev = threading.Event()
         self.cap = None
         self._frame_id = 0
+        self._lock = threading.Lock()
+        self._opened = False
+        self._last_frame_ts: Optional[float] = None
+        self._last_error: str = ""
 
-    def run(self):
+    @property
+    def is_open(self) -> bool:
+        with self._lock:
+            return self._opened
+
+    @property
+    def last_frame_age_sec(self) -> Optional[float]:
+        with self._lock:
+            if self._last_frame_ts is None:
+                return None
+            return max(0.0, time.time() - self._last_frame_ts)
+
+    @property
+    def last_error(self) -> str:
+        with self._lock:
+            return self._last_error
+
+    def _set_state(self, *, opened: bool, error: str = "", frame_ts: Optional[float] = None):
+        with self._lock:
+            self._opened = opened
+            if error:
+                self._last_error = error
+            elif opened:
+                self._last_error = ""
+            if frame_ts is not None:
+                self._last_frame_ts = frame_ts
+
+    def _open_capture(self):
+        if self.cap is not None:
+            try:
+                self.cap.release()
+            except Exception:
+                pass
+            self.cap = None
+
         if CFG.CAMERA_GSTREAMER:
             # Prefer explicit pipeline when provided (common for Jetson CSI cameras)
             self.cap = cv2.VideoCapture(CFG.CAMERA_GSTREAMER, cv2.CAP_GSTREAMER)
+            src = "gstreamer pipeline"
         else:
             self.cap = cv2.VideoCapture(self.cam_index)
-        if not self.cap.isOpened():
-            src = "gstreamer pipeline" if CFG.CAMERA_GSTREAMER else f"index {self.cam_index}"
-            print(f"[camera] failed to open camera ({src}).")
-            return
+            src = f"index {self.cam_index}"
+
+        if self.cap is None or not self.cap.isOpened():
+            self._set_state(opened=False, error=f"failed to open camera ({src})")
+            print(f"[camera] {self.last_error}. Will retry.")
+            return False
+
+        self._set_state(opened=True)
+        print(f"[camera] opened ({src})")
+        return True
+
+    def _drain_stale_frames(self):
+        # Keep only the most recent frame to avoid stale frames being reused
+        # across multiple queries when the consumer is slower than the camera.
+        while True:
+            try:
+                self.out_q.get_nowait()
+            except queue.Empty:
+                break
+
+    def run(self):
+        consecutive_read_fails = 0
         while not self.stop_ev.is_set():
+            if not self.is_open:
+                if not self._open_capture():
+                    self.stop_ev.wait(self.OPEN_RETRY_SEC)
+                    continue
+                consecutive_read_fails = 0
+
             ok, frame = self.cap.read()
             if ok:
+                consecutive_read_fails = 0
                 self._frame_id += 1
                 frame_ts = time.time()
-                # Keep only the most recent frame to avoid stale frames being reused
-                # across multiple queries when the consumer is slower than the camera.
-                while not self.out_q.empty():
-                    try:
-                        self.out_q.get_nowait()
-                    except Exception:
-                        break
+                self._drain_stale_frames()
                 try:
                     # Store (frame_id, timestamp, frame_bgr)
                     self.out_q.put_nowait((self._frame_id, frame_ts, frame))
-                except Exception:
+                    self._set_state(opened=True, frame_ts=frame_ts)
+                except queue.Full:
                     pass
+            else:
+                consecutive_read_fails += 1
+                if consecutive_read_fails >= self.MAX_CONSECUTIVE_READ_FAILS:
+                    self._set_state(
+                        opened=False,
+                        error=f"camera read failed {consecutive_read_fails} times; reopening",
+                    )
+                    print(f"[camera] {self.last_error}")
+                    consecutive_read_fails = 0
+                    try:
+                        if self.cap is not None:
+                            self.cap.release()
+                    except Exception:
+                        pass
+                    self.cap = None
+                    self.stop_ev.wait(self.OPEN_RETRY_SEC)
+                    continue
             time.sleep(CFG.FRAME_INTERVAL_SEC)
+
+        try:
+            if self.cap is not None:
+                self.cap.release()
+        except Exception:
+            pass
+        self.cap = None
+        self._set_state(opened=False)
 
     def stop(self):
         self.stop_ev.set()
         if self.cap:
-            self.cap.release()
+            try:
+                self.cap.release()
+            except Exception:
+                pass
+            self.cap = None
+        self._set_state(opened=False)
 
 # ========= Utility =========
 
@@ -244,6 +338,16 @@ class ModelService:
         self.model = NanoVLM()
         self.frames: queue.Queue = queue.Queue(maxsize=5)
         self.cam_worker = CameraWorker(CFG.CAMERA_INDEX, self.frames)
+
+    def camera_health(self) -> Dict[str, Any]:
+        """Snapshot used by handler status + clearer no-frame errors."""
+        age = self.cam_worker.last_frame_age_sec
+        return {
+            "camera_open": bool(self.cam_worker.is_open),
+            "camera_last_frame_age_sec": None if age is None else round(float(age), 2),
+            "camera_error": self.cam_worker.last_error or None,
+            "frames_queued": int(self.frames.qsize()),
+        }
 
     # -------------------------
     # Pause / resume
@@ -313,9 +417,18 @@ class ModelService:
         results = self.run_inference_many(query_text, num_frames=1, timeout_sec=2.0)
         return results[0] if results else {}
 
-    def run_inference_many(self, query_text: str, num_frames: int, timeout_sec: float = 2.0) -> list[Dict[str, Any]]:
+    def run_inference_many(
+        self,
+        query_text: str,
+        num_frames: int,
+        timeout_sec: float = 2.0,
+        video_path: Optional[str] = None,
+    ) -> list[Dict[str, Any]]:
         """
-        Run inference for query_text on up to num_frames camera frames.
+        Run inference for query_text on up to num_frames frames.
+
+        Frames come from the live camera by default, or from ``video_path``
+        (a file in the edge's video directory) when the Host picked one.
         Returns a list of {"frame_id","frame_ts","image","results"} dicts.
         """
         # Guardrails
@@ -327,15 +440,22 @@ class ModelService:
 
         self.model.set_query(query_text)
 
+        if video_path:
+            return self._run_inference_on_video(video_path, n)
+
         out: list[Dict[str, Any]] = []
         deadline = time.time() + float(timeout_sec)
 
         while len(out) < n and time.time() < deadline:
             try:
-                remaining = max(0.01, deadline - time.time())
+                remaining = max(0.05, deadline - time.time())
                 frame_id, frame_ts, frame = self.frames.get(timeout=remaining)
             except queue.Empty:
-                break
+                # No frame within this wait slice. If the camera is reconnecting,
+                # keep waiting until the overall deadline; otherwise stop.
+                if out or self.cam_worker.is_open:
+                    break
+                continue
 
             result = self.model.infer(frame)
             out.append(
@@ -348,3 +468,47 @@ class ModelService:
             )
 
         return out
+
+    def _run_inference_on_video(self, video_path: str, n: int) -> list[Dict[str, Any]]:
+        """Sample n frames spread evenly across a recorded video and infer on each.
+
+        No timeout here: unlike the camera queue, the file is already on disk,
+        so the only cost is decode + inference for exactly n frames.
+        """
+        cap = cv2.VideoCapture(video_path)
+        if not cap.isOpened():
+            print(f"[video] failed to open {video_path}")
+            return []
+
+        try:
+            total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+            fps = float(cap.get(cv2.CAP_PROP_FPS) or 0.0)
+            # Evenly spaced sample points; fall back to sequential reads when the
+            # container does not report a frame count (common for some MP4s).
+            if total > 0:
+                targets = [int(i * total / (n + 1)) for i in range(1, n + 1)]
+            else:
+                targets = list(range(n))
+
+            out: list[Dict[str, Any]] = []
+            for frame_index in targets:
+                if total > 0:
+                    cap.set(cv2.CAP_PROP_POS_FRAMES, frame_index)
+                ok, frame = cap.read()
+                if not ok:
+                    break
+                result = self.model.infer(frame)
+                out.append(
+                    {
+                        "frame_id": frame_index,
+                        # No wall-clock timestamp for a recording — the handler
+                        # stamps these with the processing time instead.
+                        "frame_ts": None,
+                        "video_offset_sec": round(frame_index / fps, 3) if fps > 0 else None,
+                        "image": encode_jpeg_b64(frame),
+                        "results": result.get("summary", ""),
+                    }
+                )
+            return out
+        finally:
+            cap.release()

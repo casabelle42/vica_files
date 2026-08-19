@@ -9,6 +9,7 @@ import uuid
 from datetime import datetime
 import platform
 from model_init import ModelService, CFG
+from video_store import ensure_video_dir, list_videos, resolve_video
 
 
 def edge_device_name() -> str:
@@ -47,6 +48,16 @@ class EdgeHandler:
         self._status_thread = None
 
         self.logger.info("Initializing EdgeHandler...")
+
+        # Video directory: created here so the camera has somewhere to record to
+        # before any query arrives. The Host is told the path and whether this
+        # run created it, so it can prompt the user.
+        self.video_dir, self.video_dir_created = ensure_video_dir()
+        if self.video_dir_created:
+            self.logger.info(f"Created video directory: {self.video_dir}")
+        else:
+            self.logger.info(f"Using existing video directory: {self.video_dir}")
+
         self._start_model_container()
         self._start_status_thread()
 
@@ -290,8 +301,14 @@ class EdgeHandler:
                         "network_strength": -60,  # Placeholder
                         "isProcessing": (self.model_service and not self.model_service.paused) if self.model_service else False,
                         "available_models": available_models,
-                        "active_model": active_model
+                        "active_model": active_model,
+                        # Video source inventory — drives the Host's video picker.
+                        "video_dir": str(self.video_dir),
+                        "video_dir_created": bool(self.video_dir_created),
+                        "available_videos": list_videos(),
                     }
+                    if self.model_service and hasattr(self.model_service, "camera_health"):
+                        device_status_body.update(self.model_service.camera_health())
                     device_status_packet = self._create_packet("device_status", device_status_body)
 
                     # Create container_status packet
@@ -410,7 +427,20 @@ class EdgeHandler:
                 )
                 return None
 
-            self.logger.info(f"Processing query_request (query_id={query_id}): {query_text}")
+            # Optional video source picked in the Host GUI. Unknown names fall
+            # back to the live camera rather than failing the whole query.
+            video_name = body.get("video")
+            video_path = resolve_video(video_name)
+            if video_name and not video_path:
+                self.logger.warning(
+                    f"Requested video {video_name!r} not found in {self.video_dir} — using live camera."
+                )
+                video_name = None
+
+            source_note = f"video={video_name!r}" if video_path else "source=live camera"
+            self.logger.info(
+                f"Processing query_request (query_id={query_id}, {source_note}): {query_text}"
+            )
             self.model_service.paused = False  # resume inference
 
             try:
@@ -419,30 +449,37 @@ class EdgeHandler:
                     query_text,
                     num_frames=getattr(CFG, "RETURN_FRAMES", 1),
                     timeout_sec=inference_timeout_sec(),
+                    video_path=str(video_path) if video_path else None,
                 )
 
                 if not isinstance(result_list, list) or len(result_list) == 0:
-                    self.logger.warning("No valid results from inference.")
-                    # Emit an explicit error response so the Host doesn't wait forever.
-                    error_body = {
-                        "query_id": query_id,
-                        "metadata": {},
-                        "answer": "Edge inference returned no frame/results. Camera may be unavailable on this device.",
-                        "frame": {
-                            "frame_id": 0,
-                            "timestamp": datetime.now().isoformat(),
-                            "detections": [
-                                {
-                                    "label": "no_results",
-                                    "confidence": 0.0,
-                                    "dets": ["No valid results from inference (likely no camera frames)."]
-                                }
-                            ]
-                        }
-                    }
-                    error_packet = self._create_packet("query_response", error_body)
-                    if self.on_update_callback:
-                        self.on_update_callback("query_response", error_packet)
+                    health = {}
+                    if hasattr(self.model_service, "camera_health"):
+                        try:
+                            health = self.model_service.camera_health() or {}
+                        except Exception:
+                            health = {}
+                    cam_open = health.get("camera_open")
+                    cam_err = health.get("camera_error")
+                    age = health.get("camera_last_frame_age_sec")
+                    if cam_open is False:
+                        detail = (
+                            f"Camera unavailable on this device"
+                            + (f" ({cam_err})" if cam_err else "")
+                            + ". Check CAMERA_INDEX / CAMERA_GSTREAMER and that no other process holds the camera."
+                        )
+                    elif age is None:
+                        detail = (
+                            "Edge inference returned no frame/results. "
+                            "Camera opened but no frames arrived before timeout."
+                        )
+                    else:
+                        detail = (
+                            "Edge inference returned no frame/results. "
+                            f"Last frame was {age}s ago; camera may be stalled."
+                        )
+                    self.logger.warning(f"No valid results from inference: {detail} health={health}")
+                    self._emit_query_response(query_id, detail, status="error")
                     return
 
                 total_chunks = len(result_list)
@@ -479,6 +516,8 @@ class EdgeHandler:
                             "image_base64": image_base64,
                             "chunk_index": int(chunk_index),
                             "total_chunks": int(total_chunks),
+                            "source": "video" if video_path else "camera",
+                            "video": video_name if video_path else None,
                         },
                         "frame": {
                             "frame_id": int(frame_id)
@@ -506,25 +545,7 @@ class EdgeHandler:
                 self.logger.error(f"Error processing query: {e}")
                 import traceback
                 traceback.print_exc()
-                # Return error in query_response format
-                error_body = {
-                    "query_id": query_id,
-                    "metadata": {},
-                    "frame": {
-                        "frame_id": 0,
-                        "timestamp": datetime.now().isoformat(),
-                        "detections": [
-                            {
-                                "label": f"Error: {str(e)}",
-                                "confidence": 0.0,
-                                "dets": []
-                            }
-                        ]
-                    }
-                }
-                error_packet = self._create_packet("query_response", error_body)
-                if self.on_update_callback:
-                    self.on_update_callback("query_response", error_packet)
+                self._emit_query_response(query_id, f"Edge inference error: {e}", status="error")
                 return
         
         # Unknown message type
@@ -550,6 +571,8 @@ class EdgeHandler:
         if self.model_service:
             try:
                 self.model_service.paused = True
+                if hasattr(self.model_service, "shutdown"):
+                    self.model_service.shutdown()
                 self.logger.info("Model paused successfully.")
             except Exception as e:
                 self.logger.warning(f"Error while stopping model: {e}")
