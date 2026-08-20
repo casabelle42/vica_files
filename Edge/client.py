@@ -195,8 +195,12 @@ class MQTTEdgeClient:
 # ------------------------
 if __name__ == "__main__":
     # Default to the NUC broker; allow override via env var.
-    MQTT_BROKER_IP = os.environ.get("VICA_MQTT_BROKER", "10.148.1.35") #10.148.1.64
+    # Default: Vector lab broker (10.148.1.35). Override with VICA_MQTT_BROKER / VICA_MQTT_PORT.
+    MQTT_BROKER_IP = os.environ.get("VICA_MQTT_BROKER", "10.148.1.35")
     MQTT_BROKER_PORT = int(os.environ.get("VICA_MQTT_PORT", "1883"))
-    print(f"[MQTTEdgeClient] Device identity: {edge_device_name()!r} (MQTT topic edge/<name>/control)")
+    print(
+        f"[MQTTEdgeClient] Device identity: {edge_device_name()!r} "
+        f"(broker {MQTT_BROKER_IP}:{MQTT_BROKER_PORT}, topic edge/<name>/control)"
+    )
     client = MQTTEdgeClient(mqtt_broker=MQTT_BROKER_IP, mqtt_port=MQTT_BROKER_PORT)
     client.start()

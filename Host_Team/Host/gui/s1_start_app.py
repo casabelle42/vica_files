@@ -871,7 +871,7 @@ def run_app(backend: HostBackend,
 # Production entry point
 # ─────────────────────────────────────────────────────────────────────────────
 def main() -> int:
-    MQTT_BROKER_IP = os.environ.get("VICA_MQTT_BROKER", "10.148.1.64")
+    MQTT_BROKER_IP = os.environ.get("VICA_MQTT_BROKER", "10.148.1.35")
     MQTT_PORT = int(os.environ.get("VICA_MQTT_PORT", "1883"))
     CONTROL_TOPIC = os.environ.get("VICA_CONTROL_TOPIC", "edge/control")
 

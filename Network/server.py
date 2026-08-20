@@ -14,8 +14,13 @@ import time
 import paho.mqtt.client as mqtt
 from paho.mqtt.client import CallbackAPIVersion
 
-BROKER = "localhost"
-PORT = 1883
+# Defaults: relay runs on the broker host (NUC or Vector failover).
+# Override with VICA_MQTT_BROKER / VICA_MQTT_PORT (e.g. port 1884 if 1883 is localhost-only).
+BROKER = os.environ.get("VICA_MQTT_BROKER", "localhost")
+try:
+    PORT = int(os.environ.get("VICA_MQTT_PORT", "1883"))
+except (TypeError, ValueError):
+    PORT = 1883
 
 HOST_TO_SERVER = "host/control"
 SERVER_TO_EDGE = "edge/control"
@@ -193,6 +198,7 @@ def main():
     client.on_connect = on_connect
     client.on_message = on_message
 
+    print(f"[NUC] Connecting to broker {BROKER}:{PORT}")
     client.connect(BROKER, PORT, 60)
     print("[NUC] Relay running...")
     client.loop_forever()
