@@ -8,7 +8,9 @@ ROOT="$(cd "$(dirname "$0")" && pwd)"
 
 export VICA_DEVICE_NAME="${VICA_DEVICE_NAME:-$(hostname)}"
 export VICA_EDGE_NAME="${VICA_EDGE_NAME:-$VICA_DEVICE_NAME}"
-export VICA_MQTT_BROKER="${VICA_MQTT_BROKER:-10.148.1.64}"
+# Default matches current lab broker on Vector (eno1). Override if NUC returns.
+export VICA_MQTT_BROKER="${VICA_MQTT_BROKER:-10.148.1.35}"
+export VICA_MQTT_PORT="${VICA_MQTT_PORT:-1883}"
 export AUTO_START_CONTAINER="${AUTO_START_CONTAINER:-0}"
 
 if [ -f "$HOME/cosmos/bin/activate" ]; then

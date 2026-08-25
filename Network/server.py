@@ -15,7 +15,7 @@ import paho.mqtt.client as mqtt
 from paho.mqtt.client import CallbackAPIVersion
 
 BROKER = "localhost"
-PORT = 1883
+PORT = 1884
 
 HOST_TO_SERVER = "host/control"
 SERVER_TO_EDGE = "edge/control"
@@ -193,6 +193,7 @@ def main():
     client.on_connect = on_connect
     client.on_message = on_message
 
+    print(f"[NUC] Connecting to broker {BROKER}:{PORT}")
     client.connect(BROKER, PORT, 60)
     print("[NUC] Relay running...")
     client.loop_forever()
