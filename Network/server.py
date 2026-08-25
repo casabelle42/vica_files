@@ -15,7 +15,7 @@ import paho.mqtt.client as mqtt
 from paho.mqtt.client import CallbackAPIVersion
 
 BROKER = "localhost"
-PORT = 1883
+PORT = 1884
 
 HOST_TO_SERVER = "host/control"
 SERVER_TO_EDGE = "edge/control"
