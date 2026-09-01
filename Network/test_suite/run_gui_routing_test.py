@@ -21,7 +21,7 @@ def main():
     from s1_start_app import run_app, MqttBackend
 
     broker = os.environ.get("VICA_MQTT_BROKER", "localhost")
-    port = int(os.environ.get("VICA_MQTT_PORT", "1883"))
+    port = int(os.environ.get("VICA_MQTT_PORT", "1884"))
 
     backend = MqttBackend(
         mqtt_broker=broker,

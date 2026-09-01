@@ -8,7 +8,7 @@ import paho.mqtt.client as mqtt
 
 
 BROKER = os.environ.get("VICA_MQTT_BROKER", "localhost")
-PORT = int(os.environ.get("VICA_MQTT_PORT", "1883"))
+PORT = int(os.environ.get("VICA_MQTT_PORT", "1884"))
 EDGE_COUNT = int(os.environ.get("VICA_TEST_EDGE_COUNT", "3"))
 
 # tiny valid 1x1 png
