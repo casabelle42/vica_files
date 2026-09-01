@@ -8,7 +8,7 @@ ROOT="$(cd "$(dirname "$0")" && pwd)"
 APP="$ROOT/Host/gui/s1_start_app.py"
 
 # Lab broker defaults — only set when unset (do not clobber overrides).
-# Port 1884 is the lab broker; Python defaults in s1_start_app.py stay on 1883.
+# Lab broker port (matches Host Python defaults on this branch).
 export VICA_MQTT_BROKER="${VICA_MQTT_BROKER:-10.148.1.35}"
 export VICA_MQTT_PORT="${VICA_MQTT_PORT:-1884}"
 

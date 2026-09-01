@@ -1,10 +1,11 @@
 # Start Host (lab)
 
-One-command Host GUI launch after pull. Git pull does **not** auto-open the GUI.
+Pull this branch, install deps once, then run the Host GUI — no manual broker/port setup.
 
 ## Setup (once)
 
-```bash
+```powershell
+git fetch origin
 git checkout feature/host-lab-launcher
 cd Host_Team
 pip install -r requirements.txt
@@ -12,7 +13,13 @@ pip install -r requirements.txt
 
 ## Run
 
-**Windows (PowerShell):**
+**Windows — double-click or terminal:**
+
+```powershell
+.\start_host.bat
+```
+
+Or:
 
 ```powershell
 .\start_host.ps1
@@ -25,16 +32,20 @@ chmod +x start_host.sh   # once
 ./start_host.sh
 ```
 
-## Broker defaults
+**Direct Python (same lab defaults on this branch):**
 
-The launchers set (only if unset):
+```powershell
+python Host/gui/s1_start_app.py
+```
 
-| Variable           | Default      |
-|--------------------|--------------|
-| `VICA_MQTT_BROKER` | `10.148.1.35` |
-| `VICA_MQTT_PORT`   | `1884`       |
+## Defaults on this branch
 
-Override before running, e.g.:
+| Setting | Value |
+|---------|-------|
+| Broker | `10.148.1.35` |
+| Port | `1884` |
+
+Override before running if needed:
 
 ```powershell
 $env:VICA_MQTT_PORT = "1883"; .\start_host.ps1
@@ -44,4 +55,8 @@ $env:VICA_MQTT_PORT = "1883"; .\start_host.ps1
 VICA_MQTT_PORT=1883 ./start_host.sh
 ```
 
-Python defaults in `s1_start_app.py` / `host_client.py` remain unchanged (port **1883**). Edge may also need port **1884** to reach the same lab broker.
+## Notes
+
+- Git pull does **not** auto-open the GUI — run one of the commands above.
+- Edge devices must also use port **1884** to reach the same lab broker.
+- Relay server on Vector: `VICA_MQTT_PORT=1884 python Network/server.py`
