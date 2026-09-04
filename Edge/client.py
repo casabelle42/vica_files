@@ -17,7 +17,7 @@ class MQTTEdgeClient:
     disconnects / missed publishes that look like "network issues".
     """
 
-    def __init__(self, mqtt_broker="localhost", mqtt_port=1883):
+    def __init__(self, mqtt_broker="localhost", mqtt_port=1884):
         self.mqtt_broker = mqtt_broker
         self.mqtt_port = mqtt_port
 
@@ -197,7 +197,7 @@ if __name__ == "__main__":
     # Default to the NUC broker; allow override via env var.
     # Default: Vector lab broker (10.148.1.35). Override with VICA_MQTT_BROKER / VICA_MQTT_PORT.
     MQTT_BROKER_IP = os.environ.get("VICA_MQTT_BROKER", "10.148.1.35")
-    MQTT_BROKER_PORT = int(os.environ.get("VICA_MQTT_PORT", "1883"))
+    MQTT_BROKER_PORT = int(os.environ.get("VICA_MQTT_PORT", "1884"))
     print(
         f"[MQTTEdgeClient] Device identity: {edge_device_name()!r} "
         f"(broker {MQTT_BROKER_IP}:{MQTT_BROKER_PORT}, topic edge/<name>/control)"

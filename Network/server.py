@@ -14,8 +14,8 @@ import time
 import paho.mqtt.client as mqtt
 from paho.mqtt.client import CallbackAPIVersion
 
-BROKER = "localhost"
-PORT = 1884
+BROKER = os.environ.get("VICA_MQTT_BROKER", "127.0.0.1")
+PORT = int(os.environ.get("VICA_MQTT_PORT", "1884"))
 
 HOST_TO_SERVER = "host/control"
 SERVER_TO_EDGE = "edge/control"

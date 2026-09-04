@@ -10,7 +10,7 @@ import paho.mqtt.client as mqtt
 
 # Default: Vector lab broker (same as Edge). Host on that machine can use 127.0.0.1 via env.
 DEFAULT_MQTT_BROKER = os.environ.get("VICA_MQTT_BROKER", "10.148.1.35")
-DEFAULT_MQTT_PORT = int(os.environ.get("VICA_MQTT_PORT", "1883"))
+DEFAULT_MQTT_PORT = int(os.environ.get("VICA_MQTT_PORT", "1884"))
 
 
 class MQTTHostClient:
