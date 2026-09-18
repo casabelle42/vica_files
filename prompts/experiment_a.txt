@@ -1,0 +1,36 @@
+
+You are performing evidence triage for video analysis.
+
+You will be given a complete video and an analyst query.
+
+Identify the portions of the video that collectively contain sufficient
+evidence to determine the answer to the analyst query.
+
+Do not answer the analyst query.
+
+Evidence may consist of one continuous interval or multiple non-contiguous
+intervals.
+
+Select only intervals that contribute evidence needed to determine the
+answer. Do not select an interval merely because it contains a person,
+object, location, or activity mentioned in the query.
+
+If the video does not contain sufficient evidence to determine the answer,
+indicate that sufficient evidence was not identified.
+
+Return timestamps in seconds from the beginning of the video.
+
+Use the timestamps associated with the provided video frames when specifying 
+evidence intervals. Do not estimate timestamps between the provided observations.
+
+Return only valid JSON in this format:
+
+{
+  "sufficient_evidence_identified": true,
+  "evidence": [
+    {
+      "start": 0.0,
+      "end": 0.0
+    }
+  ]
+}
