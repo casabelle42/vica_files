@@ -1,0 +1,915 @@
+{
+  "name": "LAS-VICA Qwen3 B/C scorer validation set",
+  "version": 1,
+  "description": "Controlled gold cases for validating required-claim component and temporal-relation judgments.",
+  "cases": [
+    {
+      "case_id": "V01",
+      "category": "direct_support",
+      "query": "Where did the man stand?",
+      "reference_answer": "The man stood beside the door.",
+      "required_claims": [
+        {
+          "claim_id": "V01_C1",
+          "components": {
+            "entity": "man",
+            "action": "stand beside",
+            "object": "door"
+          }
+        }
+      ],
+      "temporal_relations": [],
+      "candidate_answer": "The man stood beside the door.",
+      "expected": {
+        "required_claims": [
+          {
+            "claim_id": "V01_C1",
+            "components": {
+              "entity": "SUPPORTED",
+              "action": "SUPPORTED",
+              "object": "SUPPORTED"
+            }
+          }
+        ],
+        "temporal_relations": []
+      }
+    },
+    {
+      "case_id": "V02",
+      "category": "direct_support",
+      "query": "What did the woman use?",
+      "reference_answer": "The woman looked through the binoculars.",
+      "required_claims": [
+        {
+          "claim_id": "V02_C1",
+          "components": {
+            "entity": "woman",
+            "action": "look through",
+            "object": "binoculars"
+          }
+        }
+      ],
+      "temporal_relations": [],
+      "candidate_answer": "The woman looked through the binoculars.",
+      "expected": {
+        "required_claims": [
+          {
+            "claim_id": "V02_C1",
+            "components": {
+              "entity": "SUPPORTED",
+              "action": "SUPPORTED",
+              "object": "SUPPORTED"
+            }
+          }
+        ],
+        "temporal_relations": []
+      }
+    },
+    {
+      "case_id": "V03",
+      "category": "direct_support",
+      "query": "What did the man pick up?",
+      "reference_answer": "The man picked up the cup.",
+      "required_claims": [
+        {
+          "claim_id": "V03_C1",
+          "components": {
+            "entity": "man",
+            "action": "pick up",
+            "object": "cup"
+          }
+        }
+      ],
+      "temporal_relations": [],
+      "candidate_answer": "The man picked up the cup.",
+      "expected": {
+        "required_claims": [
+          {
+            "claim_id": "V03_C1",
+            "components": {
+              "entity": "SUPPORTED",
+              "action": "SUPPORTED",
+              "object": "SUPPORTED"
+            }
+          }
+        ],
+        "temporal_relations": []
+      }
+    },
+    {
+      "case_id": "V04",
+      "category": "direct_support",
+      "query": "Where did the woman go?",
+      "reference_answer": "The woman entered the office.",
+      "required_claims": [
+        {
+          "claim_id": "V04_C1",
+          "components": {
+            "entity": "woman",
+            "action": "enter",
+            "location": "office"
+          }
+        }
+      ],
+      "temporal_relations": [],
+      "candidate_answer": "The woman entered the office.",
+      "expected": {
+        "required_claims": [
+          {
+            "claim_id": "V04_C1",
+            "components": {
+              "entity": "SUPPORTED",
+              "action": "SUPPORTED",
+              "location": "SUPPORTED"
+            }
+          }
+        ],
+        "temporal_relations": []
+      }
+    },
+    {
+      "case_id": "V05",
+      "category": "paraphrase",
+      "query": "What did the woman do with the binoculars?",
+      "reference_answer": "The woman looked through the binoculars.",
+      "required_claims": [
+        {
+          "claim_id": "V05_C1",
+          "components": {
+            "entity": "woman",
+            "action": "look through",
+            "object": "binoculars"
+          }
+        }
+      ],
+      "temporal_relations": [],
+      "candidate_answer": "The woman peered through the binoculars.",
+      "expected": {
+        "required_claims": [
+          {
+            "claim_id": "V05_C1",
+            "components": {
+              "entity": "SUPPORTED",
+              "action": "SUPPORTED",
+              "object": "SUPPORTED"
+            }
+          }
+        ],
+        "temporal_relations": []
+      }
+    },
+    {
+      "case_id": "V06",
+      "category": "paraphrase",
+      "query": "What did the man do?",
+      "reference_answer": "The man exited the room.",
+      "required_claims": [
+        {
+          "claim_id": "V06_C1",
+          "components": {
+            "entity": "man",
+            "action": "exit",
+            "location": "room"
+          }
+        }
+      ],
+      "temporal_relations": [],
+      "candidate_answer": "The man left the room.",
+      "expected": {
+        "required_claims": [
+          {
+            "claim_id": "V06_C1",
+            "components": {
+              "entity": "SUPPORTED",
+              "action": "SUPPORTED",
+              "location": "SUPPORTED"
+            }
+          }
+        ],
+        "temporal_relations": []
+      }
+    },
+    {
+      "case_id": "V07",
+      "category": "paraphrase",
+      "query": "What did the man do with the phone?",
+      "reference_answer": "The man raised the phone.",
+      "required_claims": [
+        {
+          "claim_id": "V07_C1",
+          "components": {
+            "entity": "man",
+            "action": "raise",
+            "object": "phone"
+          }
+        }
+      ],
+      "temporal_relations": [],
+      "candidate_answer": "The man lifted the phone.",
+      "expected": {
+        "required_claims": [
+          {
+            "claim_id": "V07_C1",
+            "components": {
+              "entity": "SUPPORTED",
+              "action": "SUPPORTED",
+              "object": "SUPPORTED"
+            }
+          }
+        ],
+        "temporal_relations": []
+      }
+    },
+    {
+      "case_id": "V08",
+      "category": "paraphrase",
+      "query": "Where was the man?",
+      "reference_answer": "The man stood next to the table.",
+      "required_claims": [
+        {
+          "claim_id": "V08_C1",
+          "components": {
+            "entity": "man",
+            "action": "stand beside",
+            "object": "table"
+          }
+        }
+      ],
+      "temporal_relations": [],
+      "candidate_answer": "The man was standing beside the table.",
+      "expected": {
+        "required_claims": [
+          {
+            "claim_id": "V08_C1",
+            "components": {
+              "entity": "SUPPORTED",
+              "action": "SUPPORTED",
+              "object": "SUPPORTED"
+            }
+          }
+        ],
+        "temporal_relations": []
+      }
+    },
+    {
+      "case_id": "V09",
+      "category": "not_mentioned",
+      "query": "Did the man open the door?",
+      "reference_answer": "The man opened the door.",
+      "required_claims": [
+        {
+          "claim_id": "V09_C1",
+          "components": {
+            "entity": "man",
+            "action": "open",
+            "object": "door"
+          }
+        }
+      ],
+      "temporal_relations": [],
+      "candidate_answer": "The man stood beside the door.",
+      "expected": {
+        "required_claims": [
+          {
+            "claim_id": "V09_C1",
+            "components": {
+              "entity": "SUPPORTED",
+              "action": "NOT_MENTIONED",
+              "object": "SUPPORTED"
+            }
+          }
+        ],
+        "temporal_relations": []
+      }
+    },
+    {
+      "case_id": "V10",
+      "category": "not_mentioned",
+      "query": "What did the woman pick up?",
+      "reference_answer": "The woman picked up the box.",
+      "required_claims": [
+        {
+          "claim_id": "V10_C1",
+          "components": {
+            "entity": "woman",
+            "action": "pick up",
+            "object": "box"
+          }
+        }
+      ],
+      "temporal_relations": [],
+      "candidate_answer": "The woman walked toward the table.",
+      "expected": {
+        "required_claims": [
+          {
+            "claim_id": "V10_C1",
+            "components": {
+              "entity": "SUPPORTED",
+              "action": "NOT_MENTIONED",
+              "object": "NOT_MENTIONED"
+            }
+          }
+        ],
+        "temporal_relations": []
+      }
+    },
+    {
+      "case_id": "V11",
+      "category": "not_mentioned",
+      "query": "Where did the man sit?",
+      "reference_answer": "The man sat in the chair.",
+      "required_claims": [
+        {
+          "claim_id": "V11_C1",
+          "components": {
+            "entity": "man",
+            "action": "sit",
+            "object": "chair"
+          }
+        }
+      ],
+      "temporal_relations": [],
+      "candidate_answer": "The man entered the room.",
+      "expected": {
+        "required_claims": [
+          {
+            "claim_id": "V11_C1",
+            "components": {
+              "entity": "SUPPORTED",
+              "action": "NOT_MENTIONED",
+              "object": "NOT_MENTIONED"
+            }
+          }
+        ],
+        "temporal_relations": []
+      }
+    },
+    {
+      "case_id": "V12",
+      "category": "not_mentioned",
+      "query": "What did the woman lower?",
+      "reference_answer": "The woman lowered the binoculars.",
+      "required_claims": [
+        {
+          "claim_id": "V12_C1",
+          "components": {
+            "entity": "woman",
+            "action": "lower",
+            "object": "binoculars"
+          }
+        }
+      ],
+      "temporal_relations": [],
+      "candidate_answer": "The woman turned toward the camera.",
+      "expected": {
+        "required_claims": [
+          {
+            "claim_id": "V12_C1",
+            "components": {
+              "entity": "SUPPORTED",
+              "action": "NOT_MENTIONED",
+              "object": "NOT_MENTIONED"
+            }
+          }
+        ],
+        "temporal_relations": []
+      }
+    },
+    {
+      "case_id": "V13",
+      "category": "contradiction",
+      "query": "Which direction did the man move?",
+      "reference_answer": "The man walked toward the door.",
+      "required_claims": [
+        {
+          "claim_id": "V13_C1",
+          "components": {
+            "entity": "man",
+            "action": "walk toward",
+            "object": "door"
+          }
+        }
+      ],
+      "temporal_relations": [],
+      "candidate_answer": "The man walked away from the door.",
+      "expected": {
+        "required_claims": [
+          {
+            "claim_id": "V13_C1",
+            "components": {
+              "entity": "SUPPORTED",
+              "action": "CONTRADICTED",
+              "object": "SUPPORTED"
+            }
+          }
+        ],
+        "temporal_relations": []
+      }
+    },
+    {
+      "case_id": "V14",
+      "category": "contradiction",
+      "query": "Did the woman raise the binoculars?",
+      "reference_answer": "The woman raised the binoculars.",
+      "required_claims": [
+        {
+          "claim_id": "V14_C1",
+          "components": {
+            "entity": "woman",
+            "action": "raise",
+            "object": "binoculars"
+          }
+        }
+      ],
+      "temporal_relations": [],
+      "candidate_answer": "The woman lowered the binoculars.",
+      "expected": {
+        "required_claims": [
+          {
+            "claim_id": "V14_C1",
+            "components": {
+              "entity": "SUPPORTED",
+              "action": "CONTRADICTED",
+              "object": "SUPPORTED"
+            }
+          }
+        ],
+        "temporal_relations": []
+      }
+    },
+    {
+      "case_id": "V15",
+      "category": "contradiction",
+      "query": "Was the door open?",
+      "reference_answer": "The door was open.",
+      "required_claims": [
+        {
+          "claim_id": "V15_C1",
+          "components": {
+            "entity": "door",
+            "state": "open"
+          }
+        }
+      ],
+      "temporal_relations": [],
+      "candidate_answer": "The door was closed.",
+      "expected": {
+        "required_claims": [
+          {
+            "claim_id": "V15_C1",
+            "components": {
+              "entity": "SUPPORTED",
+              "state": "CONTRADICTED"
+            }
+          }
+        ],
+        "temporal_relations": []
+      }
+    },
+    {
+      "case_id": "V16",
+      "category": "contradiction",
+      "query": "Did the man enter or leave?",
+      "reference_answer": "The man entered the room.",
+      "required_claims": [
+        {
+          "claim_id": "V16_C1",
+          "components": {
+            "entity": "man",
+            "action": "enter",
+            "location": "room"
+          }
+        }
+      ],
+      "temporal_relations": [],
+      "candidate_answer": "The man left the room.",
+      "expected": {
+        "required_claims": [
+          {
+            "claim_id": "V16_C1",
+            "components": {
+              "entity": "SUPPORTED",
+              "action": "CONTRADICTED",
+              "location": "SUPPORTED"
+            }
+          }
+        ],
+        "temporal_relations": []
+      }
+    },
+    {
+      "case_id": "V17",
+      "category": "coreference",
+      "query": "What did the man do after entering?",
+      "reference_answer": "The man entered and stood beside the door.",
+      "required_claims": [
+        {
+          "claim_id": "V17_C1",
+          "components": {
+            "entity": "man",
+            "action": "stand beside",
+            "object": "door"
+          }
+        }
+      ],
+      "temporal_relations": [],
+      "candidate_answer": "The man entered the room. He then stood beside the door.",
+      "expected": {
+        "required_claims": [
+          {
+            "claim_id": "V17_C1",
+            "components": {
+              "entity": "SUPPORTED",
+              "action": "SUPPORTED",
+              "object": "SUPPORTED"
+            }
+          }
+        ],
+        "temporal_relations": []
+      }
+    },
+    {
+      "case_id": "V18",
+      "category": "coreference",
+      "query": "What did the woman do?",
+      "reference_answer": "The woman lowered the binoculars.",
+      "required_claims": [
+        {
+          "claim_id": "V18_C1",
+          "components": {
+            "entity": "woman",
+            "action": "lower",
+            "object": "binoculars"
+          }
+        }
+      ],
+      "temporal_relations": [],
+      "candidate_answer": "The woman looked ahead for several seconds. She lowered the binoculars.",
+      "expected": {
+        "required_claims": [
+          {
+            "claim_id": "V18_C1",
+            "components": {
+              "entity": "SUPPORTED",
+              "action": "SUPPORTED",
+              "object": "SUPPORTED"
+            }
+          }
+        ],
+        "temporal_relations": []
+      }
+    },
+    {
+      "case_id": "V19",
+      "category": "coreference",
+      "query": "What did the man do with the cup?",
+      "reference_answer": "The man picked up the cup.",
+      "required_claims": [
+        {
+          "claim_id": "V19_C1",
+          "components": {
+            "entity": "man",
+            "action": "pick up",
+            "object": "cup"
+          }
+        }
+      ],
+      "temporal_relations": [],
+      "candidate_answer": "A man approached the table. He picked up the cup.",
+      "expected": {
+        "required_claims": [
+          {
+            "claim_id": "V19_C1",
+            "components": {
+              "entity": "SUPPORTED",
+              "action": "SUPPORTED",
+              "object": "SUPPORTED"
+            }
+          }
+        ],
+        "temporal_relations": []
+      }
+    },
+    {
+      "case_id": "V20",
+      "category": "coreference_ambiguous",
+      "query": "What did the first man do?",
+      "reference_answer": "The first man opened the door.",
+      "required_claims": [
+        {
+          "claim_id": "V20_C1",
+          "components": {
+            "entity": "first man",
+            "action": "open",
+            "object": "door"
+          }
+        }
+      ],
+      "temporal_relations": [],
+      "candidate_answer": "Two men stood by the door. He opened it.",
+      "expected": {
+        "required_claims": [
+          {
+            "claim_id": "V20_C1",
+            "components": {
+              "entity": "NOT_MENTIONED",
+              "action": "SUPPORTED",
+              "object": "SUPPORTED"
+            }
+          }
+        ],
+        "temporal_relations": []
+      }
+    },
+    {
+      "case_id": "V21",
+      "category": "specificity",
+      "query": "What object did the man approach?",
+      "reference_answer": "The man walked toward the rolling table.",
+      "required_claims": [
+        {
+          "claim_id": "V21_C1",
+          "components": {
+            "entity": "man",
+            "action": "walk toward",
+            "object": "rolling table"
+          }
+        }
+      ],
+      "temporal_relations": [],
+      "candidate_answer": "The man walked across the room.",
+      "expected": {
+        "required_claims": [
+          {
+            "claim_id": "V21_C1",
+            "components": {
+              "entity": "SUPPORTED",
+              "action": "NOT_MENTIONED",
+              "object": "NOT_MENTIONED"
+            }
+          }
+        ],
+        "temporal_relations": []
+      }
+    },
+    {
+      "case_id": "V22",
+      "category": "specificity",
+      "query": "What did the woman do with the phone?",
+      "reference_answer": "The woman photographed the vehicle with the phone.",
+      "required_claims": [
+        {
+          "claim_id": "V22_C1",
+          "components": {
+            "entity": "woman",
+            "action": "photograph",
+            "object": "vehicle",
+            "instrument": "phone"
+          }
+        }
+      ],
+      "temporal_relations": [],
+      "candidate_answer": "The woman used her phone.",
+      "expected": {
+        "required_claims": [
+          {
+            "claim_id": "V22_C1",
+            "components": {
+              "entity": "SUPPORTED",
+              "action": "NOT_MENTIONED",
+              "object": "NOT_MENTIONED",
+              "instrument": "SUPPORTED"
+            }
+          }
+        ],
+        "temporal_relations": []
+      }
+    },
+    {
+      "case_id": "V23",
+      "category": "specificity",
+      "query": "Where did the man stand?",
+      "reference_answer": "The man stood beside the left door.",
+      "required_claims": [
+        {
+          "claim_id": "V23_C1",
+          "components": {
+            "entity": "man",
+            "action": "stand beside",
+            "object": "left door"
+          }
+        }
+      ],
+      "temporal_relations": [],
+      "candidate_answer": "The man stood near a door.",
+      "expected": {
+        "required_claims": [
+          {
+            "claim_id": "V23_C1",
+            "components": {
+              "entity": "SUPPORTED",
+              "action": "SUPPORTED",
+              "object": "NOT_MENTIONED"
+            }
+          }
+        ],
+        "temporal_relations": []
+      }
+    },
+    {
+      "case_id": "V24",
+      "category": "specificity",
+      "query": "What did the man place on the table?",
+      "reference_answer": "The man placed the small box on the table.",
+      "required_claims": [
+        {
+          "claim_id": "V24_C1",
+          "components": {
+            "entity": "man",
+            "action": "place",
+            "object": "small box",
+            "location": "table"
+          }
+        }
+      ],
+      "temporal_relations": [],
+      "candidate_answer": "The man put an object on the table.",
+      "expected": {
+        "required_claims": [
+          {
+            "claim_id": "V24_C1",
+            "components": {
+              "entity": "SUPPORTED",
+              "action": "SUPPORTED",
+              "object": "NOT_MENTIONED",
+              "location": "SUPPORTED"
+            }
+          }
+        ],
+        "temporal_relations": []
+      }
+    },
+    {
+      "case_id": "V25",
+      "category": "temporal_support",
+      "query": "What happened after the man entered?",
+      "reference_answer": "The man entered the room before sitting down.",
+      "required_claims": [],
+      "temporal_relations": [
+        {
+          "relation_id": "V25_T1",
+          "first_event": "man entered room",
+          "relation": "before",
+          "second_event": "man sat down"
+        }
+      ],
+      "candidate_answer": "The man entered the room and then sat down.",
+      "expected": {
+        "required_claims": [],
+        "temporal_relations": [
+          {
+            "relation_id": "V25_T1",
+            "classification": "SUPPORTED"
+          }
+        ]
+      }
+    },
+    {
+      "case_id": "V26",
+      "category": "temporal_contradiction",
+      "query": "Did the man sit before or after entering?",
+      "reference_answer": "The man entered the room before sitting down.",
+      "required_claims": [],
+      "temporal_relations": [
+        {
+          "relation_id": "V26_T1",
+          "first_event": "man entered room",
+          "relation": "before",
+          "second_event": "man sat down"
+        }
+      ],
+      "candidate_answer": "The man sat down before entering the room.",
+      "expected": {
+        "required_claims": [],
+        "temporal_relations": [
+          {
+            "relation_id": "V26_T1",
+            "classification": "CONTRADICTED"
+          }
+        ]
+      }
+    },
+    {
+      "case_id": "V27",
+      "category": "temporal_omission",
+      "query": "What did the man do in the room?",
+      "reference_answer": "The man entered the room before sitting down.",
+      "required_claims": [],
+      "temporal_relations": [
+        {
+          "relation_id": "V27_T1",
+          "first_event": "man entered room",
+          "relation": "before",
+          "second_event": "man sat down"
+        }
+      ],
+      "candidate_answer": "The man entered the room and sat down.",
+      "expected": {
+        "required_claims": [],
+        "temporal_relations": [
+          {
+            "relation_id": "V27_T1",
+            "classification": "NOT_MENTIONED"
+          }
+        ]
+      }
+    },
+    {
+      "case_id": "V28",
+      "category": "temporal_support",
+      "query": "What happened after the woman lowered the binoculars?",
+      "reference_answer": "The woman lowered the binoculars and afterward turned toward the camera.",
+      "required_claims": [],
+      "temporal_relations": [
+        {
+          "relation_id": "V28_T1",
+          "first_event": "woman lowered binoculars",
+          "relation": "before",
+          "second_event": "woman turned toward camera"
+        }
+      ],
+      "candidate_answer": "After lowering the binoculars, she turned toward the camera.",
+      "expected": {
+        "required_claims": [],
+        "temporal_relations": [
+          {
+            "relation_id": "V28_T1",
+            "classification": "SUPPORTED"
+          }
+        ]
+      }
+    },
+    {
+      "case_id": "V29",
+      "category": "borderline_compatible",
+      "query": "What did the man do before standing beside the door?",
+      "reference_answer": "The man walked toward the door and then stood beside it.",
+      "required_claims": [
+        {
+          "claim_id": "V29_C1",
+          "components": {
+            "entity": "man",
+            "action": "walk toward",
+            "object": "door"
+          }
+        }
+      ],
+      "temporal_relations": [],
+      "candidate_answer": "He walked away from the table.",
+      "expected": {
+        "required_claims": [
+          {
+            "claim_id": "V29_C1",
+            "components": {
+              "entity": "SUPPORTED",
+              "action": "NOT_MENTIONED",
+              "object": "NOT_MENTIONED"
+            }
+          }
+        ],
+        "temporal_relations": []
+      }
+    },
+    {
+      "case_id": "V30",
+      "category": "borderline_partial",
+      "query": "Where did the woman move?",
+      "reference_answer": "The woman walked from the table toward the door.",
+      "required_claims": [
+        {
+          "claim_id": "V30_C1",
+          "components": {
+            "entity": "woman",
+            "action": "walk toward",
+            "object": "door"
+          }
+        }
+      ],
+      "temporal_relations": [],
+      "candidate_answer": "The woman walked away from the table.",
+      "expected": {
+        "required_claims": [
+          {
+            "claim_id": "V30_C1",
+            "components": {
+              "entity": "SUPPORTED",
+              "action": "NOT_MENTIONED",
+              "object": "NOT_MENTIONED"
+            }
+          }
+        ],
+        "temporal_relations": []
+      }
+    }
+  ]
+}

@@ -1,0 +1,213 @@
+You are evaluating answers produced by a vision-language model.
+
+For each test case, compare the CANDIDATE ANSWER against the REFERENCE CLAIM.
+
+Classify the reference claim using exactly one of:
+
+SUPPORTED
+- The candidate answer explicitly states the claim or clearly expresses the same meaning.
+- A reasonable paraphrase with the same meaning counts as support.
+
+CONTRADICTED
+- The candidate answer states something that conflicts with the claim.
+- This includes assigning the action, object, location, state, or temporal relationship to something incompatible with the reference claim.
+
+NOT_MENTIONED
+- The candidate answer neither supports nor contradicts the claim.
+- Do not treat missing information as a contradiction.
+- Do not infer a claim merely because it would be plausible.
+
+Important rules:
+
+1. Evaluate only the specified REFERENCE CLAIM.
+2. Do not evaluate the overall quality of the candidate answer.
+3. Do not use outside knowledge.
+4. Do not infer events or details that are not expressed by the candidate answer.
+5. Treat reasonable paraphrases as equivalent.
+6. Additional information in the candidate answer does not change the classification unless it contradicts the reference claim.
+7. If only part of a multi-part reference claim is supported and the remaining part is not addressed, classify the complete claim as NOT_MENTIONED.
+8. If the candidate explicitly reverses a temporal relationship, classify it as CONTRADICTED.
+9. Expressions of uncertainty such as "may have," "might have," or "appears to" do not establish a claim as definitely true.
+10. Judge what the candidate answer says, not what may have actually happened in the video.
+11. A claim is SUPPORTED only when all essential components of the claim are supported by the candidate answer. Essential components may include the entity, action, object, location, state, and temporal relationship. Do not infer a more specific component from a less specific statement. For example, "walked away" does not establish "walked to the door."
+
+Return JSON only in this format:
+
+{
+  "results": [
+    {
+      "case_id": "T9",
+      "classification": "SUPPORTED"
+    }
+  ]
+}
+
+TEST CASES
+
+T1
+REFERENCE CLAIM:
+The man reached toward the box.
+
+CANDIDATE ANSWER:
+The man leaned over the table and extended his hand toward the box.
+
+T2
+REFERENCE CLAIM:
+The man picked up the box.
+
+CANDIDATE ANSWER:
+The man reached toward the box but did not pick it up.
+
+T3
+REFERENCE CLAIM:
+The man walked toward the door.
+
+CANDIDATE ANSWER:
+The man reached across the table toward the box.
+
+T4
+REFERENCE CLAIM:
+The man handed the box to the woman.
+
+CANDIDATE ANSWER:
+The man reached toward the box, but no handoff occurred.
+
+T5
+REFERENCE CLAIM:
+The man reached toward the box before returning to the door.
+
+CANDIDATE ANSWER:
+The man reached across the table and then walked back toward the door.
+
+T6
+REFERENCE CLAIM:
+The man reached toward the box before returning to the door.
+
+CANDIDATE ANSWER:
+The man returned to the door and then reached toward the box.
+
+T7
+REFERENCE CLAIM:
+The man walked back to the door.
+
+CANDIDATE ANSWER:
+The man walked back to the door and picked up a red folder.
+
+T8
+REFERENCE CLAIM:
+The man stood beside the door.
+
+CANDIDATE ANSWER:
+The woman stood beside the door while the man remained near the table.
+
+T9
+REFERENCE CLAIM:
+The man walked toward the door.
+
+CANDIDATE ANSWER:
+After leaving the table, he headed back toward the doorway.
+
+T10
+REFERENCE CLAIM:
+The man picked up the box.
+
+CANDIDATE ANSWER:
+The man may have picked up something from the table.
+
+T11
+REFERENCE CLAIM:
+The man reached toward the box.
+
+CANDIDATE ANSWER:
+The man reached across the table toward the cup.
+
+T12
+REFERENCE CLAIM:
+The man stood beside the door.
+
+CANDIDATE ANSWER:
+The man stopped and remained next to the doorway.
+
+T13
+REFERENCE CLAIM:
+The man carried the box to the door.
+
+CANDIDATE ANSWER:
+The man walked to the door.
+
+T14
+REFERENCE CLAIM:
+The man reached toward the box before walking to the door.
+
+CANDIDATE ANSWER:
+The man reached toward the box. He later walked away.
+
+T15
+REFERENCE CLAIM:
+The man reached toward the box before walking to the door.
+
+CANDIDATE ANSWER:
+After walking to the door, the man returned to the table and reached toward the box.
+
+T16
+REFERENCE CLAIM:
+The man did not pick up the box.
+
+CANDIDATE ANSWER:
+He reached toward the box and then withdrew his empty hand.
+
+T17
+REFERENCE CLAIM:
+The man did not hand the box to the woman.
+
+CANDIDATE ANSWER:
+The man and woman were both near the table.
+
+T18
+REFERENCE CLAIM:
+The man handed the box to the woman.
+
+CANDIDATE ANSWER:
+The man extended the box toward the woman, but she did not take it.
+
+T19
+REFERENCE CLAIM:
+The man stood beside the door.
+
+CANDIDATE ANSWER:
+The man stood beside the table, while the woman waited by the door.
+
+T20
+REFERENCE CLAIM:
+The man reached toward the box.
+
+CANDIDATE ANSWER:
+The man reached toward the box. Later, the answer states that he never reached for anything on the table.
+
+T21
+REFERENCE CLAIM:
+The man walked to the table and reached toward the box.
+
+CANDIDATE ANSWER:
+The man walked over to the table.
+
+T22
+REFERENCE CLAIM:
+The box remained on the table.
+
+CANDIDATE ANSWER:
+The box was still sitting on the table when the man walked away.
+
+T23
+REFERENCE CLAIM:
+The cup and box remained on the table.
+
+CANDIDATE ANSWER:
+The box remained on the table.
+
+T24
+REFERENCE CLAIM:
+The man returned to the door after reaching toward the box.
+
+CANDIDATE ANSWER:
+He reached across the table, withdrew his hand, and then went back to where he had been standing by the door.
