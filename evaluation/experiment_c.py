@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 
 import argparse
 import json
@@ -9,21 +10,24 @@ import subprocess
 from datetime import datetime
 
 
+# ======================================================================
+# Configuration
+# ======================================================================
+
 PROJECT_ROOT = "/home/las_edge_account/LAS-VICA"
 CONTAINER_PROJECT_ROOT = "/workspace"
-
-DEFAULT_ANNOTATION_DIR = os.path.join(
-    PROJECT_ROOT,
-    "videos",
-    "counterfactual_vids",
-    "annotations"
-)
 
 DEFAULT_VIDEO_DIR = os.path.join(
     PROJECT_ROOT,
     "videos",
     "counterfactual_vids",
     "data"
+)
+
+DEFAULT_PROMPT = os.path.join(
+    PROJECT_ROOT,
+    "prompts",
+    "experiment_c.txt"
 )
 
 DEFAULT_OUTPUT_DIR = os.path.join(
@@ -33,7 +37,24 @@ DEFAULT_OUTPUT_DIR = os.path.join(
 )
 
 
+# ----------------------------------------------------------------------
+# Global Experiment C condition order
+#
+# This is a fixed experimental rule and therefore does not need to be
+# repeated in every annotation.
+# ----------------------------------------------------------------------
+
+CONDITION_ORDER = [
+    "isolated_frame",
+    "sparse_frames",
+    "short_sequence",
+    "full_relevant",
+    "full_video",
+]
+
+
 MODEL_CONFIG = {
+
     "cosmos_reason2": {
         "display_name": "Cosmos-Reason2",
         "container": "cosmos-reason2",
@@ -41,7 +62,11 @@ MODEL_CONFIG = {
             "/workspace/models/"
             "cosmos-reason2/"
             "cosmos-reason2_infer.py"
-        )
+        ),
+        "response_start":
+            "=== Cosmos-Reason2 Response ===",
+        "response_end":
+            "=== End Response ===",
     },
 
     "cosmos3": {
@@ -51,10 +76,20 @@ MODEL_CONFIG = {
             "/workspace/models/"
             "cosmos3-edge/"
             "cosmos3_infer.py"
-        )
-    }
+        ),
+        "response_start":
+            "=== Cosmos3 Edge Response ===",
+        "response_end":
+            "=== End Response ===",
+    },
+
+    # InternVideo 2.5 still needs to be implemented.
 }
 
+
+# ======================================================================
+# File utilities
+# ======================================================================
 
 def load_json(path):
 
@@ -65,6 +100,17 @@ def load_json(path):
     ) as f:
 
         return json.load(f)
+
+
+def load_text(path):
+
+    with open(
+        path,
+        "r",
+        encoding="utf-8"
+    ) as f:
+
+        return f.read().strip()
 
 
 def save_json(data, path):
@@ -83,26 +129,36 @@ def save_json(data, path):
         json.dump(
             data,
             f,
-            indent=2
+            indent=2,
+            ensure_ascii=False
         )
 
 
+# ======================================================================
+# Path utilities
+# ======================================================================
+
 def host_to_container_path(path):
 
-    absolute_path = os.path.abspath(path)
+    absolute_path = os.path.abspath(
+        path
+    )
 
-    if not absolute_path.startswith(
+    project_root = os.path.abspath(
         PROJECT_ROOT
-    ):
+    )
+
+    relative_path = os.path.relpath(
+        absolute_path,
+        project_root
+    )
+
+    if relative_path.startswith(".."):
+
         raise ValueError(
             "Path must be inside LAS-VICA project: "
             f"{absolute_path}"
         )
-
-    relative_path = os.path.relpath(
-        absolute_path,
-        PROJECT_ROOT
-    )
 
     return os.path.join(
         CONTAINER_PROJECT_ROOT,
@@ -110,46 +166,56 @@ def host_to_container_path(path):
     )
 
 
-def segments_to_intervals(
-    segment_ids,
-    timestamps
-):
+# ======================================================================
+# Interval utilities
+# ======================================================================
 
-    intervals = []
+def merge_intervals(intervals):
 
-    for segment_id in segment_ids:
+    if not intervals:
+        return []
 
-        if (
-            segment_id < 0
-            or segment_id >= len(timestamps)
-        ):
-            raise ValueError(
-                "Invalid segment ID: "
-                f"{segment_id}"
-            )
-
-        start, end = timestamps[
-            segment_id
-        ]
-
-        intervals.append(
+    normalized = sorted(
+        [
             [
                 float(start),
                 float(end)
             ]
-        )
+            for start, end in intervals
+        ],
+        key=lambda x: x[0]
+    )
 
-    return intervals
+    merged = [
+        normalized[0]
+    ]
+
+    for start, end in normalized[1:]:
+
+        last = merged[-1]
+
+        if start <= last[1]:
+
+            last[1] = max(
+                last[1],
+                end
+            )
+
+        else:
+
+            merged.append(
+                [start, end]
+            )
+
+    return merged
 
 
 def interval_duration(intervals):
 
     return sum(
-        max(
-            0.0,
-            float(end) - float(start)
-        )
-        for start, end in intervals
+        end - start
+        for start, end
+        in merge_intervals(intervals)
     )
 
 
@@ -176,48 +242,238 @@ def temporal_span_from_intervals(
     if not intervals:
         return 0.0
 
-    starts = [
-        float(interval[0])
-        for interval in intervals
+    merged = merge_intervals(
+        intervals
+    )
+
+    return (
+        merged[-1][1]
+        - merged[0][0]
+    )
+
+
+# ======================================================================
+# Evidence validation
+# ======================================================================
+
+def validate_frame_timestamps(
+    timestamps,
+    video_duration
+):
+
+    for timestamp in timestamps:
+
+        if timestamp < 0:
+
+            raise ValueError(
+                "Frame timestamp cannot "
+                f"be negative: {timestamp}"
+            )
+
+        if timestamp > video_duration:
+
+            raise ValueError(
+                "Frame timestamp exceeds "
+                f"video duration: {timestamp}"
+            )
+
+
+def validate_intervals(
+    intervals,
+    video_duration
+):
+
+    for start, end in intervals:
+
+        if start < 0:
+
+            raise ValueError(
+                "Interval start cannot "
+                f"be negative: {start}"
+            )
+
+        if end < start:
+
+            raise ValueError(
+                "Interval end precedes "
+                f"start: [{start}, {end}]"
+            )
+
+        if end > video_duration:
+
+            raise ValueError(
+                "Interval exceeds video "
+                f"duration: [{start}, {end}]"
+            )
+
+
+# ======================================================================
+# Prompt
+# ======================================================================
+
+def build_question(
+    base_prompt,
+    analyst_query
+):
+
+    return (
+        f"{base_prompt.rstrip()}\n\n"
+        f"Analyst query:\n"
+        f"{analyst_query.strip()}"
+    )
+
+
+# ======================================================================
+# Model response extraction
+# ======================================================================
+
+def extract_model_response(
+    stdout,
+    model_name
+):
+
+    config = MODEL_CONFIG[
+        model_name
     ]
 
-    ends = [
-        float(interval[1])
-        for interval in intervals
-    ]
+    start_marker = re.escape(
+        config["response_start"]
+    )
 
-    return max(ends) - min(starts)
+    end_marker = re.escape(
+        config["response_end"]
+    )
 
+    pattern = re.compile(
+        start_marker
+        + r"\s*(.*?)\s*"
+        + end_marker,
+        re.DOTALL
+    )
 
-def extract_model_response(stdout):
+    match = pattern.search(
+        stdout
+    )
 
-    patterns = [
-        (
-            r"=== Cosmos-Reason2 Response ==="
-            r"\s*(.*?)\s*"
-            r"=== End Response ==="
-        ),
-        (
-            r"=== Cosmos3 Edge Response ==="
-            r"\s*(.*?)\s*"
-            r"=== End Response ==="
-        )
-    ]
+    if match:
 
-    for pattern in patterns:
-
-        match = re.search(
-            pattern,
-            stdout,
-            flags=re.DOTALL
-        )
-
-        if match:
-
-            return match.group(1).strip()
+        return match.group(1).strip()
 
     return stdout.strip()
 
+
+# ======================================================================
+# JSON response parsing
+# ======================================================================
+
+def strip_markdown_json_fence(text):
+
+    text = text.strip()
+
+    match = re.fullmatch(
+        r"```(?:json)?\s*(.*?)\s*```",
+        text,
+        flags=re.DOTALL | re.IGNORECASE
+    )
+
+    if match:
+
+        return match.group(1).strip()
+
+    return text
+
+
+def parse_json_response(text):
+    """
+    Experiment C uses the same answer contract as Experiment B:
+
+        {
+            "answer": "<natural-language answer>"
+        }
+
+    Structured scoring is performed separately by the automated
+    answer evaluator.
+    """
+
+    if not text:
+
+        return {
+            "parse_success": False,
+            "validation_success": False,
+            "parsed": None,
+            "error": "empty response",
+        }
+
+    cleaned = strip_markdown_json_fence(
+        text
+    )
+
+    try:
+
+        parsed = json.loads(
+            cleaned
+        )
+
+    except json.JSONDecodeError as exc:
+
+        return {
+            "parse_success": False,
+            "validation_success": False,
+            "parsed": None,
+            "error": str(exc),
+        }
+
+    if not isinstance(
+        parsed,
+        dict
+    ):
+
+        return {
+            "parse_success": True,
+            "validation_success": False,
+            "parsed": parsed,
+            "error":
+                "response JSON must be an object",
+        }
+
+    answer = parsed.get(
+        "answer"
+    )
+
+    if not isinstance(
+        answer,
+        str
+    ):
+
+        return {
+            "parse_success": True,
+            "validation_success": False,
+            "parsed": parsed,
+            "error":
+                "answer must be a string",
+        }
+
+    if not answer.strip():
+
+        return {
+            "parse_success": True,
+            "validation_success": False,
+            "parsed": parsed,
+            "error":
+                "answer must not be empty",
+        }
+
+    return {
+        "parse_success": True,
+        "validation_success": True,
+        "parsed": parsed,
+        "error": None,
+    }
+
+
+# ======================================================================
+# Docker command
+# ======================================================================
 
 def build_command(
     model_name,
@@ -314,6 +570,10 @@ def build_command(
     return command
 
 
+# ======================================================================
+# Model execution
+# ======================================================================
+
 def run_model(
     model_name,
     video_path,
@@ -345,31 +605,74 @@ def run_model(
         text=True
     )
 
-    response = None
+    if completed.returncode != 0:
 
-    if completed.returncode == 0:
+        return {
+            "execution_success": False,
+            "return_code":
+                completed.returncode,
+            "raw_response": None,
+            "parse_success": False,
+            "validation_success": False,
+            "validation_error":
+                completed.stderr,
+            "parsed_response": None,
+            "stdout":
+                completed.stdout,
+            "stderr":
+                completed.stderr,
+            "condition_status":
+                "execution_failure",
+        }
 
-        response = extract_model_response(
-            completed.stdout
-        )
+    response_text = extract_model_response(
+        completed.stdout,
+        model_name
+    )
+
+    parsed = parse_json_response(
+        response_text
+    )
 
     return {
-        "execution_success":
-            completed.returncode == 0,
+        "execution_success": True,
 
         "return_code":
             completed.returncode,
 
-        "response":
-            response,
+        "raw_response":
+            response_text,
+
+        "parse_success":
+            parsed["parse_success"],
+
+        "validation_success":
+            parsed["validation_success"],
+
+        "validation_error":
+            parsed["error"],
+
+        "parsed_response":
+            parsed["parsed"],
 
         "stdout":
             completed.stdout,
 
         "stderr":
-            completed.stderr
+            completed.stderr,
+
+        "condition_status":
+            (
+                "valid"
+                if parsed["validation_success"]
+                else "invalid_output"
+            ),
     }
 
+
+# ======================================================================
+# Resolve Experiment C condition
+# ======================================================================
 
 def resolve_condition(
     condition_name,
@@ -381,6 +684,14 @@ def resolve_condition(
     evidence_type = condition.get(
         "evidence_type"
     )
+
+    video_duration = float(
+        annotation["duration"]
+    )
+
+    # ------------------------------------------------------------------
+    # Isolated / sparse frames
+    # ------------------------------------------------------------------
 
     if evidence_type == "frames":
 
@@ -400,6 +711,11 @@ def resolve_condition(
                 "no frame timestamps"
             )
 
+        validate_frame_timestamps(
+            frame_timestamps,
+            video_duration
+        )
+
         return {
             "resolved_evidence_type":
                 "frames",
@@ -411,12 +727,23 @@ def resolve_condition(
                 None
         }
 
+    # ------------------------------------------------------------------
+    # Explicit short sequence
+    # ------------------------------------------------------------------
+
     if evidence_type == "intervals":
 
-        intervals = condition.get(
-            "intervals",
-            []
-        )
+        intervals = [
+            [
+                float(start),
+                float(end)
+            ]
+            for start, end
+            in condition.get(
+                "intervals",
+                []
+            )
+        ]
 
         if not intervals:
 
@@ -426,13 +753,10 @@ def resolve_condition(
                 "no intervals"
             )
 
-        intervals = [
-            [
-                float(start),
-                float(end)
-            ]
-            for start, end in intervals
-        ]
+        validate_intervals(
+            intervals,
+            video_duration
+        )
 
         return {
             "resolved_evidence_type":
@@ -444,36 +768,52 @@ def resolve_condition(
             "evidence_intervals":
                 intervals
         }
+
+    # ------------------------------------------------------------------
+    # Full relevant evidence
+    #
+    # IMPORTANT:
+    # Use finalized relevant_intervals directly.
+    # Do not reconstruct these from relevant_segments.
+    # ------------------------------------------------------------------
 
     if (
         evidence_type
         == "ground_truth_relevant"
     ):
 
-        relevant_segments = (
+        evidence = (
             query[
                 "ground_truth"
             ][
                 "evidence"
-            ].get(
-                "relevant_segments",
-                []
-            )
+            ]
         )
 
-        intervals = segments_to_intervals(
-            relevant_segments,
-            annotation["timestamps"]
-        )
+        intervals = [
+            [
+                float(start),
+                float(end)
+            ]
+            for start, end
+            in evidence.get(
+                "relevant_intervals",
+                []
+            )
+        ]
 
         if not intervals:
 
             raise ValueError(
                 f"{query['query_id']} "
                 f"{condition_name}: "
-                "no ground-truth relevant "
-                "segments"
+                "no relevant_intervals"
             )
+
+        validate_intervals(
+            intervals,
+            video_duration
+        )
 
         return {
             "resolved_evidence_type":
@@ -485,6 +825,10 @@ def resolve_condition(
             "evidence_intervals":
                 intervals
         }
+
+    # ------------------------------------------------------------------
+    # Full video
+    # ------------------------------------------------------------------
 
     if evidence_type == "full_video":
 
@@ -506,6 +850,10 @@ def resolve_condition(
         f"{evidence_type}"
     )
 
+
+# ======================================================================
+# Evidence budget
+# ======================================================================
 
 def calculate_requested_budget(
     resolved,
@@ -532,7 +880,10 @@ def calculate_requested_budget(
                 ),
 
             "evidence_duration_seconds":
-                0.0
+                0.0,
+
+            "percentage_video_duration":
+                0.0,
         }
 
     if evidence_type == "intervals":
@@ -540,6 +891,18 @@ def calculate_requested_budget(
         intervals = resolved[
             "evidence_intervals"
         ]
+
+        duration = interval_duration(
+            intervals
+        )
+
+        percentage = (
+            100.0
+            * duration
+            / float(video_duration)
+            if video_duration > 0
+            else 0.0
+        )
 
         return {
             "requested_frame_count":
@@ -551,9 +914,10 @@ def calculate_requested_budget(
                 ),
 
             "evidence_duration_seconds":
-                interval_duration(
-                    intervals
-                )
+                duration,
+
+            "percentage_video_duration":
+                percentage,
         }
 
     if evidence_type == "full_video":
@@ -566,7 +930,10 @@ def calculate_requested_budget(
                 float(video_duration),
 
             "evidence_duration_seconds":
-                float(video_duration)
+                float(video_duration),
+
+            "percentage_video_duration":
+                100.0,
         }
 
     raise ValueError(
@@ -574,6 +941,10 @@ def calculate_requested_budget(
         f"{evidence_type}"
     )
 
+
+# ======================================================================
+# Console helpers
+# ======================================================================
 
 def print_condition_header(
     condition_name,
@@ -615,6 +986,46 @@ def print_condition_header(
         )
 
 
+def print_model_result(
+    model_result
+):
+
+    if model_result.get(
+        "parsed_response"
+    ):
+
+        print(
+            json.dumps(
+                model_result[
+                    "parsed_response"
+                ],
+                indent=2,
+                ensure_ascii=False
+            )
+        )
+
+    elif model_result.get(
+        "raw_response"
+    ):
+
+        print(
+            model_result[
+                "raw_response"
+            ]
+        )
+
+    else:
+
+        print(
+            "Status: "
+            f"{model_result['condition_status']}"
+        )
+
+
+# ======================================================================
+# Main
+# ======================================================================
+
 def main():
 
     parser = argparse.ArgumentParser(
@@ -647,6 +1058,11 @@ def main():
     )
 
     parser.add_argument(
+        "--prompt-file",
+        default=DEFAULT_PROMPT
+    )
+
+    parser.add_argument(
         "--output-dir",
         default=DEFAULT_OUTPUT_DIR
     )
@@ -663,6 +1079,7 @@ def main():
     parser.add_argument(
         "--condition",
         default=None,
+        choices=CONDITION_ORDER,
         help=(
             "Optional single Experiment C "
             "condition to run."
@@ -671,13 +1088,25 @@ def main():
 
     args = parser.parse_args()
 
+    # ------------------------------------------------------------------
+    # Load annotation and prompt
+    # ------------------------------------------------------------------
+
     annotation = load_json(
         args.annotation
+    )
+
+    base_prompt = load_text(
+        args.prompt_file
     )
 
     model_config = MODEL_CONFIG[
         args.model
     ]
+
+    # ------------------------------------------------------------------
+    # Resolve video
+    # ------------------------------------------------------------------
 
     if args.video is None:
 
@@ -693,6 +1122,7 @@ def main():
     if not os.path.isfile(
         host_video_path
     ):
+
         raise FileNotFoundError(
             f"Video not found: "
             f"{host_video_path}"
@@ -704,43 +1134,19 @@ def main():
         )
     )
 
-    c_config = annotation.get(
-        "experiment_c_config"
+    video_duration = float(
+        annotation["duration"]
     )
 
-    if not c_config:
-
-        raise ValueError(
-            "Annotation is missing "
-            "experiment_c_config"
-        )
-
-    condition_order = c_config.get(
-        "condition_order",
-        []
-    )
-
-    if not condition_order:
-
-        raise ValueError(
-            "experiment_c_config is "
-            "missing condition_order"
-        )
-
-    if (
-        args.condition is not None
-        and args.condition
-        not in condition_order
-    ):
-        raise ValueError(
-            "Unknown condition: "
-            f"{args.condition}"
-        )
+    # ------------------------------------------------------------------
+    # Result structure
+    # ------------------------------------------------------------------
 
     results = {
         "experiment": "C",
 
-        "model": args.model,
+        "model":
+            args.model,
 
         "model_display_name":
             model_config[
@@ -761,12 +1167,40 @@ def main():
             "sample_fps":
                 args.sample_fps,
 
+            "prompt_file":
+                os.path.relpath(
+                    os.path.abspath(
+                        args.prompt_file
+                    ),
+                    PROJECT_ROOT
+                ),
+
             "condition_order":
-                condition_order
+                CONDITION_ORDER,
+
+            "full_relevant_policy":
+                "relevant_intervals",
+
+            "answer_contract": {
+                "answer":
+                    "natural-language string"
+            },
+
+            "evaluation_policy":
+                (
+                    "Structured answer evaluation "
+                    "is performed separately using "
+                    "the same automated scorer as "
+                    "Experiment B."
+                ),
         },
 
         "queries": []
     }
+
+    # ------------------------------------------------------------------
+    # Select queries
+    # ------------------------------------------------------------------
 
     queries = annotation[
         "queries"
@@ -788,6 +1222,10 @@ def main():
                 f"{args.query_id}"
             )
 
+    # ------------------------------------------------------------------
+    # Run queries
+    # ------------------------------------------------------------------
+
     for query_index, query in enumerate(
         queries,
         start=1
@@ -797,9 +1235,14 @@ def main():
             "query_id"
         ]
 
-        question = query[
+        analyst_query = query[
             "query"
         ]
+
+        question = build_question(
+            base_prompt,
+            analyst_query
+        )
 
         print()
         print("=" * 60)
@@ -809,7 +1252,13 @@ def main():
             f"{query_id}"
         )
         print("=" * 60)
-        print(question)
+        print(
+            analyst_query
+        )
+
+        # --------------------------------------------------------------
+        # Per-query C annotation
+        # --------------------------------------------------------------
 
         experiment_c = query.get(
             "experiment_c"
@@ -827,37 +1276,79 @@ def main():
             {}
         )
 
+        # --------------------------------------------------------------
+        # Preserve complete scoring ground truth
+        # --------------------------------------------------------------
+
+        ground_truth = query[
+            "ground_truth"
+        ]
+
         query_result = {
             "query_id":
                 query_id,
 
             "query":
-                question,
+                analyst_query,
 
             "query_type":
                 query.get(
                     "query_type"
                 ),
 
-            "ground_truth_answer":
-                query[
-                    "ground_truth"
-                ][
-                    "answer"
-                ],
+            "ground_truth": {
+                "answer":
+                    ground_truth.get(
+                        "answer"
+                    ),
+
+                "required_claims":
+                    ground_truth.get(
+                        "required_claims",
+                        []
+                    ),
+
+                "supporting_claims":
+                    ground_truth.get(
+                        "supporting_claims",
+                        []
+                    ),
+
+                "temporal_relations":
+                    ground_truth.get(
+                        "temporal_relations",
+                        []
+                    ),
+
+                "evidence":
+                    ground_truth.get(
+                        "evidence",
+                        {}
+                    ),
+            },
 
             "conditions": {}
         }
 
-        conditions_to_run = (
-            condition_order
-        )
+        # --------------------------------------------------------------
+        # Select conditions
+        # --------------------------------------------------------------
 
         if args.condition is not None:
 
             conditions_to_run = [
                 args.condition
             ]
+
+        else:
+
+            conditions_to_run = (
+                CONDITION_ORDER
+            )
+
+        # --------------------------------------------------------------
+        # Run conditions
+        # --------------------------------------------------------------
 
         for condition_name in (
             conditions_to_run
@@ -890,29 +1381,33 @@ def main():
             budget = (
                 calculate_requested_budget(
                     resolved,
-                    annotation[
-                        "duration"
-                    ]
+                    video_duration
                 )
             )
 
             model_result = run_model(
                 model_name=args.model,
+
                 video_path=(
                     container_video_path
                 ),
+
                 question=question,
+
                 sample_fps=args.sample_fps,
+
                 evidence_type=(
                     resolved[
                         "resolved_evidence_type"
                     ]
                 ),
+
                 frame_timestamps=(
                     resolved[
                         "frame_timestamps"
                     ]
                 ),
+
                 evidence_intervals=(
                     resolved[
                         "evidence_intervals"
@@ -922,37 +1417,16 @@ def main():
 
             print()
 
-            if model_result[
-                "execution_success"
-            ]:
-
-                print(
-                    model_result[
-                        "response"
-                    ]
-                )
-
-            else:
-
-                print(
-                    "ERROR: model inference "
-                    "failed."
-                )
-
-                if model_result[
-                    "stderr"
-                ]:
-                    print(
-                        model_result[
-                            "stderr"
-                        ]
-                    )
+            print_model_result(
+                model_result
+            )
 
             query_result[
                 "conditions"
             ][
                 condition_name
             ] = {
+
                 "annotation_evidence_type":
                     condition[
                         "evidence_type"
@@ -986,9 +1460,34 @@ def main():
                         "return_code"
                     ],
 
-                "response":
+                "raw_response":
                     model_result[
-                        "response"
+                        "raw_response"
+                    ],
+
+                "parse_success":
+                    model_result[
+                        "parse_success"
+                    ],
+
+                "validation_success":
+                    model_result[
+                        "validation_success"
+                    ],
+
+                "validation_error":
+                    model_result[
+                        "validation_error"
+                    ],
+
+                "parsed_response":
+                    model_result[
+                        "parsed_response"
+                    ],
+
+                "condition_status":
+                    model_result[
+                        "condition_status"
                     ],
 
                 "stdout":
@@ -1007,6 +1506,69 @@ def main():
         ].append(
             query_result
         )
+
+    # ------------------------------------------------------------------
+    # Summary
+    # ------------------------------------------------------------------
+
+    total_conditions = sum(
+        len(query["conditions"])
+        for query in results["queries"]
+    )
+
+    valid_conditions = sum(
+        1
+        for query in results["queries"]
+        for condition in query[
+            "conditions"
+        ].values()
+        if condition[
+            "condition_status"
+        ] == "valid"
+    )
+
+    execution_failures = sum(
+        1
+        for query in results["queries"]
+        for condition in query[
+            "conditions"
+        ].values()
+        if condition[
+            "condition_status"
+        ] == "execution_failure"
+    )
+
+    invalid_outputs = sum(
+        1
+        for query in results["queries"]
+        for condition in query[
+            "conditions"
+        ].values()
+        if condition[
+            "condition_status"
+        ] == "invalid_output"
+    )
+
+    results["summary"] = {
+        "total_queries":
+            len(results["queries"]),
+
+        "total_conditions":
+            total_conditions,
+
+        "valid_conditions":
+            valid_conditions,
+
+        "execution_failures":
+            execution_failures,
+
+        "invalid_outputs":
+            invalid_outputs,
+    }
+
+    # ------------------------------------------------------------------
+    # Save
+    # ------------------------------------------------------------------
 
     timestamp = datetime.now().strftime(
         "%Y%m%d_%H%M%S"
@@ -1028,6 +1590,10 @@ def main():
         output_path
     )
 
+    # ------------------------------------------------------------------
+    # Final console output
+    # ------------------------------------------------------------------
+
     print()
     print("=" * 60)
     print("Experiment C Complete")
@@ -1048,14 +1614,24 @@ def main():
         f"{len(results['queries'])}"
     )
 
-    condition_count = sum(
-        len(query["conditions"])
-        for query in results["queries"]
+    print(
+        f"Conditions: "
+        f"{total_conditions}"
     )
 
     print(
-        f"Conditions: "
-        f"{condition_count}"
+        f"Valid:      "
+        f"{valid_conditions}"
+    )
+
+    print(
+        f"Invalid:    "
+        f"{invalid_outputs}"
+    )
+
+    print(
+        f"Failures:   "
+        f"{execution_failures}"
     )
 
     print()

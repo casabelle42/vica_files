@@ -1,3 +1,6 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
 import argparse
 import json
 import os
@@ -43,6 +46,7 @@ MODEL_CONFIGS = {
     },
 }
 
+
 # ----------------------------------------------------------------------
 # File loading
 # ----------------------------------------------------------------------
@@ -64,13 +68,13 @@ def load_text(path):
 def resolve_video_path(annotation_path, annotation):
     """
     Expected dataset structure:
-    
+
         videos/counterfactual_vids/
             annotations/
                 IMG_2460.json
             data/
                 IMG_2460.MOV
-    
+
     The annotations and data directories are siblings.
     """
 
@@ -251,6 +255,7 @@ def extract_model_response(stdout, model_name):
 
     return stdout.strip()
 
+
 # ----------------------------------------------------------------------
 # Parse Experiment A JSON
 # ----------------------------------------------------------------------
@@ -283,6 +288,51 @@ def strip_markdown_json_fence(text):
 
     return text
 
+
+def extract_json_object(text):
+    """
+    Extract the first valid JSON object from a model response.
+
+    This allows a model to emit reasoning or other text before or
+    after its structured Experiment A response while preserving the
+    complete raw response separately for auditing.
+    """
+
+    if not text:
+        return None
+
+    text = text.strip()
+
+    # First try the complete response.
+    try:
+        data = json.loads(text)
+
+        if isinstance(data, dict):
+            return data
+
+    except json.JSONDecodeError:
+        pass
+
+    # Otherwise search for the first valid JSON object.
+    decoder = json.JSONDecoder()
+
+    for index, char in enumerate(text):
+
+        if char != "{":
+            continue
+
+        try:
+            data, _ = decoder.raw_decode(
+                text[index:]
+            )
+
+            if isinstance(data, dict):
+                return data
+
+        except json.JSONDecodeError:
+            continue
+
+    return None
 
 def validation_failure(
     data,
@@ -319,20 +369,21 @@ def parse_experiment_a_response(response_text):
         invalid_format
         inconsistent_evidence
     """
-
+    
     cleaned = strip_markdown_json_fence(
         response_text
     )
-
-    try:
-        data = json.loads(cleaned)
-
-    except json.JSONDecodeError as exc:
+    
+    data = extract_json_object(
+        cleaned
+    )
+    
+    if data is None:
         return {
             "parse_success": False,
             "validation_success": False,
             "validation_error": (
-                f"Invalid JSON: {exc}"
+                "No valid JSON object found in model response"
             ),
             "response_status": "invalid_format",
             "parsed": None,
@@ -549,43 +600,172 @@ def intervals_overlap(a, b):
 
 
 # ----------------------------------------------------------------------
-# Ground truth
+# Finalized annotation access
 # ----------------------------------------------------------------------
 
-def get_ground_truth_intervals(
-    annotation,
-    query
-):
+def get_evidence_ground_truth(query):
     """
-    Convert relevant segment indices into temporal intervals.
+    Return the finalized Experiment A evidence annotations.
+
+    relevant_intervals:
+        All temporal evidence relevant to the query.
+
+    minimal_sufficient_intervals:
+        The smallest annotated evidence set sufficient to answer.
+
+    hard_negative_intervals:
+        Plausible but misleading evidence for the query.
+
+    excluded_intervals:
+        Explicitly non-relevant evidence.
+
+    relevant_segments:
+        Semantic segments relevant to the query. These remain useful
+        for segment/event coverage but are no longer used as the
+        primary temporal ground truth.
     """
 
-    segment_ids = (
+    evidence = (
         query["ground_truth"]
         ["evidence"]
-        ["relevant_segments"]
     )
+
+    return {
+        "relevant_intervals":
+            evidence.get(
+                "relevant_intervals",
+                []
+            ),
+
+        "minimal_sufficient_intervals":
+            evidence.get(
+                "minimal_sufficient_intervals",
+                []
+            ),
+
+        "hard_negative_intervals":
+            evidence.get(
+                "hard_negative_intervals",
+                []
+            ),
+
+        "excluded_intervals":
+            evidence.get(
+                "excluded_intervals",
+                []
+            ),
+
+        "relevant_segments":
+            evidence.get(
+                "relevant_segments",
+                []
+            ),
+    }
+
+
+def get_relevant_segment_intervals(
+    annotation,
+    relevant_segments
+):
+    """
+    Convert relevant semantic segment IDs into intervals.
+
+    These intervals are used only for relevant-segment coverage,
+    not for primary temporal precision/recall/IoU.
+
+    Segment intervals are read from the finalized annotation's
+    top-level "segments" array.
+    """
 
     intervals = []
 
-    for segment_id in segment_ids:
+    segments = annotation.get(
+        "segments",
+        []
+    )
 
-        if (
-            segment_id < 0
-            or segment_id >= len(
-                annotation["timestamps"]
+    # Build a lookup by explicit segment_id rather than assuming
+    # segment IDs always equal list positions.
+    segment_lookup = {
+        segment["segment_id"]: segment
+        for segment in segments
+        if isinstance(segment, dict)
+        and "segment_id" in segment
+    }
+
+    for segment_id in relevant_segments:
+
+        if segment_id not in segment_lookup:
+            raise KeyError(
+                f"Relevant segment ID {segment_id} "
+                f"not found in annotation segments"
             )
+
+        segment = segment_lookup[
+            segment_id
+        ]
+
+        start = segment.get("start")
+        end = segment.get("end")
+
+        if not isinstance(
+            start,
+            (int, float)
         ):
-            raise IndexError(
-                f"Invalid relevant segment "
-                f"{segment_id}"
+            raise ValueError(
+                f"Segment {segment_id} has "
+                f"invalid start: {start}"
+            )
+
+        if not isinstance(
+            end,
+            (int, float)
+        ):
+            raise ValueError(
+                f"Segment {segment_id} has "
+                f"invalid end: {end}"
+            )
+
+        if end < start:
+            raise ValueError(
+                f"Segment {segment_id} has "
+                f"end < start"
             )
 
         intervals.append(
-            annotation["timestamps"][segment_id]
+            [
+                float(start),
+                float(end)
+            ]
         )
 
     return intervals
+
+# ----------------------------------------------------------------------
+# Prediction validation
+# ----------------------------------------------------------------------
+
+def selected_intervals_within_video(
+    selected_intervals,
+    video_duration
+):
+    """
+    Ensure all predicted evidence intervals fall within
+    the annotated video duration.
+    """
+
+    for start, end in selected_intervals:
+
+        if start < 0:
+            return False
+
+        if end < start:
+            return False
+
+        if end > video_duration:
+            return False
+
+    return True
 
 
 # ----------------------------------------------------------------------
@@ -593,51 +773,209 @@ def get_ground_truth_intervals(
 # ----------------------------------------------------------------------
 
 def make_zero_metrics(
-    gt_intervals,
-    relevant_segments
+    evidence_gt,
+    annotation
 ):
-    ground_truth_duration = sum(
-        end - start
-        for start, end in gt_intervals
+    """
+    Return zero-valued task metrics for an executed query that
+    failed to produce usable evidence.
+
+    Metrics that are not applicable to the query remain None.
+    """
+
+    relevant_intervals = (
+        evidence_gt["relevant_intervals"]
+    )
+
+    minimal_intervals = (
+        evidence_gt[
+            "minimal_sufficient_intervals"
+        ]
+    )
+
+    hard_negative_intervals = (
+        evidence_gt[
+            "hard_negative_intervals"
+        ]
+    )
+
+    excluded_intervals = (
+        evidence_gt[
+            "excluded_intervals"
+        ]
+    )
+
+    relevant_segments = (
+        evidence_gt["relevant_segments"]
+    )
+
+    relevant_duration = interval_duration(
+        relevant_intervals
+    )
+
+    minimal_duration = interval_duration(
+        minimal_intervals
+    )
+
+    hard_negative_duration = interval_duration(
+        hard_negative_intervals
+    )
+
+    excluded_duration = interval_duration(
+        excluded_intervals
     )
 
     return {
-        "selected_duration_seconds": 0.0,
-        "ground_truth_duration_seconds": ground_truth_duration,
-        "intersection_seconds": 0.0,
-        "temporal_precision": 0.0,
-        "temporal_recall": 0.0,
-        "temporal_iou": 0.0,
-        "percentage_video_retained": 0.0,
-        "relevant_segments_found": 0,
-        "relevant_segments_total": len(relevant_segments),
-        "relevant_segment_recall": 0.0,
-        "event_level_miss": True,
+        "selected_duration_seconds":
+            0.0,
+
+        "relevant_duration_seconds":
+            relevant_duration,
+
+        "intersection_seconds":
+            0.0,
+
+        "temporal_precision":
+            0.0,
+
+        "temporal_recall":
+            0.0,
+
+        "temporal_iou":
+            0.0,
+
+        "percentage_video_retained":
+            0.0,
+
+        "minimal_sufficient_duration_seconds":
+            minimal_duration,
+
+        "minimal_sufficient_intersection_seconds":
+            0.0,
+
+        "minimal_sufficient_coverage":
+            (
+                0.0
+                if minimal_duration > 0
+                else None
+            ),
+
+        "minimal_sufficient_fully_covered":
+            (
+                False
+                if minimal_duration > 0
+                else None
+            ),
+
+        "hard_negative_duration_seconds":
+            hard_negative_duration,
+
+        "hard_negative_selected_seconds":
+            0.0,
+
+        "hard_negative_fp_rate":
+            (
+                0.0
+                if hard_negative_duration > 0
+                else None
+            ),
+
+        "excluded_duration_seconds":
+            excluded_duration,
+
+        "excluded_selected_seconds":
+            0.0,
+
+        "relevant_segments_found":
+            0,
+
+        "relevant_segments_total":
+            len(relevant_segments),
+
+        "relevant_segment_recall":
+            (
+                0.0
+                if relevant_segments
+                else None
+            ),
+
+        "event_level_miss":
+            (
+                True
+                if relevant_segments
+                else None
+            ),
     }
-        
+
+
 def calculate_metrics(
-    ground_truth_intervals,
+    evidence_gt,
     selected_intervals,
-    video_duration
+    annotation
 ):
     """
-    Calculate provisional Experiment A metrics.
+    Calculate finalized Experiment A metrics.
 
-    These are segment-derived metrics until finer
-    relevant_intervals/minimum_sufficient_intervals
-    are available.
+    Primary temporal metrics use relevant_intervals.
+
+    relevant_segments are evaluated separately to preserve
+    semantic/event coverage information.
+
+    hard_negative_intervals and excluded_intervals are also
+    evaluated separately because they have different meanings.
     """
 
-    gt_merged = merge_intervals(
-        ground_truth_intervals
+    video_duration = float(
+        annotation["duration"]
+    )
+
+    # --------------------------------------------------------------
+    # Ground-truth evidence
+    # --------------------------------------------------------------
+
+    relevant_intervals = merge_intervals(
+        evidence_gt["relevant_intervals"]
+    )
+
+    minimal_intervals = merge_intervals(
+        evidence_gt[
+            "minimal_sufficient_intervals"
+        ]
+    )
+
+    hard_negative_intervals = merge_intervals(
+        evidence_gt[
+            "hard_negative_intervals"
+        ]
+    )
+
+    excluded_intervals = merge_intervals(
+        evidence_gt[
+            "excluded_intervals"
+        ]
+    )
+
+    relevant_segments = (
+        evidence_gt["relevant_segments"]
+    )
+
+    relevant_segment_intervals = (
+        get_relevant_segment_intervals(
+            annotation,
+            relevant_segments
+        )
     )
 
     selected_merged = merge_intervals(
         selected_intervals
     )
 
-    gt_duration = interval_duration(
-        gt_merged
+    # --------------------------------------------------------------
+    # Primary temporal metrics
+    # --------------------------------------------------------------
+
+    relevant_duration = interval_duration(
+        relevant_intervals
     )
 
     selected_duration = interval_duration(
@@ -645,12 +983,12 @@ def calculate_metrics(
     )
 
     intersection = intersection_duration(
-        gt_merged,
+        relevant_intervals,
         selected_merged
     )
 
     union = (
-        gt_duration
+        relevant_duration
         + selected_duration
         - intersection
     )
@@ -662,8 +1000,8 @@ def calculate_metrics(
     )
 
     temporal_recall = (
-        intersection / gt_duration
-        if gt_duration > 0
+        intersection / relevant_duration
+        if relevant_duration > 0
         else 0.0
     )
 
@@ -682,16 +1020,78 @@ def calculate_metrics(
     )
 
     # --------------------------------------------------------------
-    # Relevant-segment recall
+    # Minimal-sufficient evidence coverage
+    # --------------------------------------------------------------
+
+    minimal_duration = interval_duration(
+        minimal_intervals
+    )
+
+    minimal_intersection = intersection_duration(
+        minimal_intervals,
+        selected_merged
+    )
+
+    if minimal_duration > 0:
+
+        minimal_coverage = (
+            minimal_intersection
+            / minimal_duration
+        )
+
+        minimal_fully_covered = (
+            minimal_coverage >= 0.999
+        )
+
+    else:
+
+        minimal_coverage = None
+        minimal_fully_covered = None
+
+    # --------------------------------------------------------------
+    # Hard-negative false-positive behavior
+    # --------------------------------------------------------------
+
+    hard_negative_duration = interval_duration(
+        hard_negative_intervals
+    )
+
+    hard_negative_selected = intersection_duration(
+        hard_negative_intervals,
+        selected_merged
+    )
+
+    hard_negative_fp_rate = (
+        hard_negative_selected
+        / hard_negative_duration
+        if hard_negative_duration > 0
+        else None
+    )
+
+    # --------------------------------------------------------------
+    # Excluded evidence
+    # --------------------------------------------------------------
+
+    excluded_duration = interval_duration(
+        excluded_intervals
+    )
+
+    excluded_selected = intersection_duration(
+        excluded_intervals,
+        selected_merged
+    )
+
+    # --------------------------------------------------------------
+    # Relevant semantic-segment recall
     #
-    # Keep semantic segments separate even when they are temporally
-    # adjacent. This lets us detect cases such as Q3 where the model
-    # finds the exit event but misses the later return event.
+    # Keep semantic segments separate even when temporally adjacent.
+    # A model may achieve high temporal recall while still missing
+    # a short but semantically important event.
     # --------------------------------------------------------------
 
     segments_found = 0
 
-    for gt_segment in ground_truth_intervals:
+    for gt_segment in relevant_segment_intervals:
 
         found = any(
             intervals_overlap(
@@ -705,25 +1105,32 @@ def calculate_metrics(
             segments_found += 1
 
     segment_total = len(
-        ground_truth_intervals
+        relevant_segment_intervals
     )
 
-    segment_recall = (
-        segments_found / segment_total
-        if segment_total > 0
-        else 0.0
-    )
+    if segment_total > 0:
 
-    event_level_miss = (
-        segments_found < segment_total
-    )
+        segment_recall = (
+            segments_found
+            / segment_total
+        )
+
+        event_level_miss = (
+            segments_found
+            < segment_total
+        )
+
+    else:
+
+        segment_recall = None
+        event_level_miss = None
 
     return {
         "selected_duration_seconds":
             selected_duration,
 
-        "ground_truth_duration_seconds":
-            gt_duration,
+        "relevant_duration_seconds":
+            relevant_duration,
 
         "intersection_seconds":
             intersection,
@@ -739,6 +1146,33 @@ def calculate_metrics(
 
         "percentage_video_retained":
             percentage_video_retained,
+
+        "minimal_sufficient_duration_seconds":
+            minimal_duration,
+
+        "minimal_sufficient_intersection_seconds":
+            minimal_intersection,
+
+        "minimal_sufficient_coverage":
+            minimal_coverage,
+
+        "minimal_sufficient_fully_covered":
+            minimal_fully_covered,
+
+        "hard_negative_duration_seconds":
+            hard_negative_duration,
+
+        "hard_negative_selected_seconds":
+            hard_negative_selected,
+
+        "hard_negative_fp_rate":
+            hard_negative_fp_rate,
+
+        "excluded_duration_seconds":
+            excluded_duration,
+
+        "excluded_selected_seconds":
+            excluded_selected,
 
         "relevant_segments_found":
             segments_found,
@@ -765,40 +1199,115 @@ def print_query_metrics(
     print(f"\n{query_id}")
 
     print(
-        f"  Precision:       "
+        f"  Precision:               "
         f"{metrics['temporal_precision']:.3f}"
     )
 
     print(
-        f"  Recall:          "
+        f"  Recall:                  "
         f"{metrics['temporal_recall']:.3f}"
     )
 
     print(
-        f"  IoU:             "
+        f"  IoU:                     "
         f"{metrics['temporal_iou']:.3f}"
     )
 
     print(
-        f"  Video retained:  "
+        f"  Video retained:          "
         f"{metrics['percentage_video_retained']:.1f}%"
     )
 
+    segment_recall = (
+        metrics["relevant_segment_recall"]
+    )
+
+    if segment_recall is not None:
+
+        print(
+            f"  Segment recall:          "
+            f"{segment_recall:.3f} "
+            f"("
+            f"{metrics['relevant_segments_found']}/"
+            f"{metrics['relevant_segments_total']}"
+            f")"
+        )
+
+    else:
+
+        print(
+            "  Segment recall:          N/A"
+        )
+
+    minimal_coverage = (
+        metrics[
+            "minimal_sufficient_coverage"
+        ]
+    )
+
+    if minimal_coverage is not None:
+
+        print(
+            f"  Minimal coverage:        "
+            f"{minimal_coverage:.3f}"
+        )
+
+        print(
+            f"  Minimal fully covered:   "
+            f"{metrics['minimal_sufficient_fully_covered']}"
+        )
+
+    else:
+
+        print(
+            "  Minimal coverage:        N/A"
+        )
+
+    hard_negative_fp = (
+        metrics["hard_negative_fp_rate"]
+    )
+
+    if hard_negative_fp is not None:
+
+        print(
+            f"  Hard-negative FP rate:   "
+            f"{hard_negative_fp:.3f}"
+        )
+
+        print(
+            f"  Hard-negative selected:  "
+            f"{metrics['hard_negative_selected_seconds']:.3f}s"
+        )
+
+    else:
+
+        print(
+            "  Hard-negative FP rate:   N/A"
+        )
+
     print(
-        f"  Segment recall:  "
-        f"{metrics['relevant_segment_recall']:.3f} "
-        f"("
-        f"{metrics['relevant_segments_found']}/"
-        f"{metrics['relevant_segments_total']}"
-        f")"
+        f"  Excluded selected:       "
+        f"{metrics['excluded_selected_seconds']:.3f}s"
     )
 
 
 def mean(values):
     if not values:
-        return 0.0
+        return None
 
     return sum(values) / len(values)
+
+
+def non_none_metric_values(
+    scored,
+    metric_name
+):
+    return [
+        q["metrics"][metric_name]
+        for q in scored
+        if q["metrics"].get(metric_name)
+        is not None
+    ]
 
 
 # ----------------------------------------------------------------------
@@ -852,6 +1361,13 @@ def print_final_summary(results):
         == "inconsistent_evidence"
     )
 
+    out_of_bounds_responses = sum(
+        1
+        for q in queries
+        if q.get("response_status")
+        == "out_of_bounds_evidence"
+    )
+
     sufficient_claimed = sum(
         1
         for q in queries
@@ -866,18 +1382,6 @@ def print_final_summary(results):
             ) is True
         )
     )
-
-    # --------------------------------------------------------------
-    # A zero-evidence output means the model produced no usable
-    # evidence selection.
-    #
-    # This includes:
-    #
-    #   evidence = []
-    #
-    # as well as an executed response for which evidence was absent
-    # or malformed and zero task metrics were therefore assigned.
-    # --------------------------------------------------------------
 
     zero_evidence = sum(
         1
@@ -897,59 +1401,134 @@ def print_final_summary(results):
     # Event-level misses
     # --------------------------------------------------------------
 
-    event_level_misses = sum(
-        1
+    event_level_scored = [
+        q
         for q in scored
         if q["metrics"].get(
             "event_level_miss"
-        ) is True
+        ) is not None
+    ]
+
+    event_level_misses = sum(
+        1
+        for q in event_level_scored
+        if q["metrics"][
+            "event_level_miss"
+        ] is True
     )
 
     # --------------------------------------------------------------
-    # Aggregate task metrics
+    # Aggregate primary metrics
     # --------------------------------------------------------------
 
-    if scored:
+    mean_precision = mean(
+        non_none_metric_values(
+            scored,
+            "temporal_precision"
+        )
+    )
 
-        mean_precision = mean([
-            q["metrics"]["temporal_precision"]
-            for q in scored
-        ])
+    mean_recall = mean(
+        non_none_metric_values(
+            scored,
+            "temporal_recall"
+        )
+    )
 
-        mean_recall = mean([
-            q["metrics"]["temporal_recall"]
-            for q in scored
-        ])
+    mean_iou = mean(
+        non_none_metric_values(
+            scored,
+            "temporal_iou"
+        )
+    )
 
-        mean_iou = mean([
-            q["metrics"]["temporal_iou"]
-            for q in scored
-        ])
+    mean_segment_recall = mean(
+        non_none_metric_values(
+            scored,
+            "relevant_segment_recall"
+        )
+    )
 
-        mean_segment_recall = mean([
-            q["metrics"][
-                "relevant_segment_recall"
-            ]
-            for q in scored
-        ])
-
-        mean_video_retained = mean([
-            q["metrics"][
-                "percentage_video_retained"
-            ]
-            for q in scored
-        ])
-
-    else:
-
-        mean_precision = None
-        mean_recall = None
-        mean_iou = None
-        mean_segment_recall = None
-        mean_video_retained = None
+    mean_video_retained = mean(
+        non_none_metric_values(
+            scored,
+            "percentage_video_retained"
+        )
+    )
 
     # --------------------------------------------------------------
-    # Store summary in results JSON
+    # Minimal-sufficient evidence summary
+    # --------------------------------------------------------------
+
+    minimal_queries = [
+        q
+        for q in scored
+        if q["metrics"].get(
+            "minimal_sufficient_coverage"
+        ) is not None
+    ]
+
+    mean_minimal_coverage = mean(
+        non_none_metric_values(
+            scored,
+            "minimal_sufficient_coverage"
+        )
+    )
+
+    minimal_fully_covered_count = sum(
+        1
+        for q in minimal_queries
+        if q["metrics"].get(
+            "minimal_sufficient_fully_covered"
+        ) is True
+    )
+
+    minimal_full_coverage_rate = (
+        minimal_fully_covered_count
+        / len(minimal_queries)
+        if minimal_queries
+        else None
+    )
+
+    # --------------------------------------------------------------
+    # Hard-negative summary
+    # --------------------------------------------------------------
+
+    hard_negative_queries = [
+        q
+        for q in scored
+        if q["metrics"].get(
+            "hard_negative_fp_rate"
+        ) is not None
+    ]
+
+    mean_hard_negative_fp_rate = mean(
+        non_none_metric_values(
+            scored,
+            "hard_negative_fp_rate"
+        )
+    )
+
+    mean_hard_negative_selected = mean(
+        non_none_metric_values(
+            hard_negative_queries,
+            "hard_negative_selected_seconds"
+        )
+    )
+
+    # --------------------------------------------------------------
+    # Excluded evidence summary
+    # --------------------------------------------------------------
+
+    mean_excluded_selected = mean(
+        non_none_metric_values(
+            scored,
+            "excluded_selected_seconds"
+        )
+    )
+
+    # --------------------------------------------------------------
+    # Store summary
     # --------------------------------------------------------------
 
     summary = {
@@ -968,6 +1547,9 @@ def print_final_summary(results):
         "inconsistent_responses":
             inconsistent_responses,
 
+        "out_of_bounds_responses":
+            out_of_bounds_responses,
+
         "sufficient_claimed":
             sufficient_claimed,
 
@@ -979,6 +1561,9 @@ def print_final_summary(results):
 
         "event_level_misses":
             event_level_misses,
+
+        "event_level_scored_queries":
+            len(event_level_scored),
 
         "mean_temporal_precision":
             mean_precision,
@@ -994,6 +1579,30 @@ def print_final_summary(results):
 
         "mean_percentage_video_retained":
             mean_video_retained,
+
+        "minimal_sufficient_queries":
+            len(minimal_queries),
+
+        "mean_minimal_sufficient_coverage":
+            mean_minimal_coverage,
+
+        "minimal_sufficient_fully_covered":
+            minimal_fully_covered_count,
+
+        "minimal_sufficient_full_coverage_rate":
+            minimal_full_coverage_rate,
+
+        "hard_negative_queries":
+            len(hard_negative_queries),
+
+        "mean_hard_negative_fp_rate":
+            mean_hard_negative_fp_rate,
+
+        "mean_hard_negative_selected_seconds":
+            mean_hard_negative_selected,
+
+        "mean_excluded_selected_seconds":
+            mean_excluded_selected,
     }
 
     results["summary"] = summary
@@ -1008,61 +1617,75 @@ def print_final_summary(results):
     print("=" * 60)
 
     print(
-        f"Model:                  "
+        f"Model:                         "
         f"{results['model_display_name']}"
     )
 
     print(
-        f"Video:                  "
+        f"Video:                         "
         f"{results['video_id']}"
     )
 
     print(
-        f"Sample FPS:             "
+        f"Sample FPS:                    "
         f"{results['configuration']['sample_fps']}"
     )
 
     print()
 
     print(
-        f"Execution success:      "
+        f"Execution success:             "
         f"{execution_successes}/{total}"
     )
 
     print(
-        f"JSON parseable:         "
+        f"JSON parseable:                "
         f"{parse_successes}/{total}"
     )
 
     print(
-        f"Semantically valid:     "
+        f"Semantically valid:            "
         f"{validation_successes}/{total}"
     )
 
     print(
-        f"Inconsistent responses: "
+        f"Inconsistent responses:        "
         f"{inconsistent_responses}/{total}"
     )
 
     print(
-        f"Sufficient claimed:     "
+        f"Out-of-bounds responses:       "
+        f"{out_of_bounds_responses}/{total}"
+    )
+
+    print(
+        f"Sufficient claimed:            "
         f"{sufficient_claimed}/{total}"
     )
 
     print(
-        f"Zero-evidence outputs:   "
+        f"Zero-evidence outputs:          "
         f"{zero_evidence}/{total}"
     )
 
     print(
-        f"Scored runs:            "
+        f"Scored runs:                   "
         f"{len(scored)}/{total}"
     )
 
-    print(
-        f"Event-level misses:      "
-        f"{event_level_misses}/{len(scored)}"
-    )
+    if event_level_scored:
+
+        print(
+            f"Event-level misses:             "
+            f"{event_level_misses}/"
+            f"{len(event_level_scored)}"
+        )
+
+    else:
+
+        print(
+            "Event-level misses:             N/A"
+        )
 
     if not scored:
         print("\nNo scored query results.")
@@ -1071,28 +1694,83 @@ def print_final_summary(results):
     print()
 
     print(
-        f"Mean precision:          "
+        f"Mean precision:                 "
         f"{mean_precision:.3f}"
     )
 
     print(
-        f"Mean recall:             "
+        f"Mean recall:                    "
         f"{mean_recall:.3f}"
     )
 
     print(
-        f"Mean IoU:                "
+        f"Mean IoU:                       "
         f"{mean_iou:.3f}"
     )
 
-    print(
-        f"Mean segment recall:     "
-        f"{mean_segment_recall:.3f}"
-    )
+    if mean_segment_recall is not None:
+
+        print(
+            f"Mean segment recall:            "
+            f"{mean_segment_recall:.3f}"
+        )
+
+    else:
+
+        print(
+            "Mean segment recall:            N/A"
+        )
 
     print(
-        f"Mean video retained:     "
+        f"Mean video retained:            "
         f"{mean_video_retained:.1f}%"
+    )
+
+    if mean_minimal_coverage is not None:
+
+        print(
+            f"Mean minimal coverage:          "
+            f"{mean_minimal_coverage:.3f}"
+        )
+
+        print(
+            f"Minimal fully covered:          "
+            f"{minimal_fully_covered_count}/"
+            f"{len(minimal_queries)}"
+        )
+
+        print(
+            f"Minimal full coverage rate:     "
+            f"{minimal_full_coverage_rate:.3f}"
+        )
+
+    else:
+
+        print(
+            "Mean minimal coverage:          N/A"
+        )
+
+    if mean_hard_negative_fp_rate is not None:
+
+        print(
+            f"Mean hard-negative FP rate:     "
+            f"{mean_hard_negative_fp_rate:.3f}"
+        )
+
+        print(
+            f"Hard-negative queries:          "
+            f"{len(hard_negative_queries)}"
+        )
+
+    else:
+
+        print(
+            "Mean hard-negative FP rate:     N/A"
+        )
+
+    print(
+        f"Mean excluded selected:         "
+        f"{mean_excluded_selected:.3f}s"
     )
 
     return summary
@@ -1192,6 +1870,9 @@ def main():
                     args.prompt,
                     PROJECT_ROOT
                 ),
+
+            "ground_truth_source":
+                "finalized_evidence_annotations",
         },
 
         "queries": [],
@@ -1225,6 +1906,20 @@ def main():
         print(
             query["query"]
         )
+
+        # --------------------------------------------------------------
+        # Load finalized evidence ground truth
+        # --------------------------------------------------------------
+
+        evidence_gt = (
+            get_evidence_ground_truth(
+                query
+            )
+        )
+
+        # --------------------------------------------------------------
+        # Build and run Experiment A prompt
+        # --------------------------------------------------------------
 
         experiment_prompt = (
             build_experiment_a_prompt(
@@ -1262,6 +1957,9 @@ def main():
 
                 "query":
                     query["query"],
+
+                "ground_truth":
+                    evidence_gt,
 
                 "execution_success":
                     False,
@@ -1313,19 +2011,6 @@ def main():
             )
         )
 
-        gt_intervals = (
-            get_ground_truth_intervals(
-                annotation,
-                query
-            )
-        )
-        
-        relevant_segments = (
-          query["ground_truth"]
-          ["evidence"]
-          ["relevant_segments"]
-)
-
         query_result = {
             "query_id":
                 query_id,
@@ -1333,14 +2018,34 @@ def main():
             "query":
                 query["query"],
 
+            "query_type":
+                query.get("query_type"),
+
             "ground_truth": {
                 "relevant_segments":
-                    query["ground_truth"]
-                    ["evidence"]
-                    ["relevant_segments"],
+                    evidence_gt[
+                        "relevant_segments"
+                    ],
 
-                "intervals":
-                    gt_intervals,
+                "relevant_intervals":
+                    evidence_gt[
+                        "relevant_intervals"
+                    ],
+
+                "minimal_sufficient_intervals":
+                    evidence_gt[
+                        "minimal_sufficient_intervals"
+                    ],
+
+                "hard_negative_intervals":
+                    evidence_gt[
+                        "hard_negative_intervals"
+                    ],
+
+                "excluded_intervals":
+                    evidence_gt[
+                        "excluded_intervals"
+                    ],
             },
 
             "execution_success":
@@ -1372,22 +2077,7 @@ def main():
         }
 
         # --------------------------------------------------------------
-        # Score model response
-        #
-        # Scoring policy:
-        #
-        # Every successfully executed query with known ground truth
-        # contributes to task-performance metrics.
-        #
-        # Valid usable evidence:
-        #     Score the selected intervals normally.
-        #
-        # Parse/schema/semantic failure with no usable evidence:
-        #     Assign zero task-performance scores.
-        #
-        # Container/model execution failure:
-        #     Leave metrics as None because no model prediction was
-        #     successfully produced.
+        # Determine whether evidence is structurally usable
         # --------------------------------------------------------------
 
         can_score_evidence = (
@@ -1397,12 +2087,15 @@ def main():
                 dict
             )
             and isinstance(
-                parsed["parsed"].get("evidence"),
+                parsed["parsed"].get(
+                    "evidence"
+                ),
                 list
             )
         )
 
         usable_evidence = False
+        selected = []
 
         if can_score_evidence:
 
@@ -1425,31 +2118,71 @@ def main():
                 for item in evidence_items
             )
 
+            if usable_evidence:
+
+                selected = [
+                    [
+                        float(item["start"]),
+                        float(item["end"])
+                    ]
+                    for item in evidence_items
+                ]
+
+                # ------------------------------------------------------
+                # Prediction must also fall within the actual video.
+                # ------------------------------------------------------
+
+                if not selected_intervals_within_video(
+                    selected,
+                    annotation["duration"]
+                ):
+
+                    usable_evidence = False
+
+                    query_result[
+                        "validation_success"
+                    ] = False
+
+                    query_result[
+                        "validation_error"
+                    ] = (
+                        "One or more evidence intervals "
+                        "fall outside the video duration"
+                    )
+
+                    query_result[
+                        "response_status"
+                    ] = "out_of_bounds_evidence"
+
+        # --------------------------------------------------------------
+        # Score model response
+        #
+        # Every successfully executed query contributes to task
+        # performance.
+        #
+        # Valid usable evidence:
+        #     Score selected intervals normally.
+        #
+        # Parse/schema/semantic/out-of-bounds failure:
+        #     Assign zero task-performance scores.
+        #
+        # Container/model execution failure:
+        #     metrics = None.
+        # --------------------------------------------------------------
+
         if usable_evidence:
 
-            selected = [
-                [
-                    item["start"],
-                    item["end"]
-                ]
-                for item in evidence_items
-            ]
-
             metrics = calculate_metrics(
-                gt_intervals,
+                evidence_gt,
                 selected,
-                annotation["duration"]
+                annotation
             )
 
         else:
 
-            # The model executed successfully but did not produce a
-            # usable evidence prediction. This is a task failure and
-            # therefore receives zero performance scores rather than
-            # being excluded from the aggregate.
             metrics = make_zero_metrics(
-                gt_intervals,
-                relevant_segments
+                evidence_gt,
+                annotation
             )
 
         query_result["metrics"] = metrics
@@ -1490,6 +2223,16 @@ def main():
                 "parsed as Experiment A JSON."
             )
 
+        elif (
+            query_result["response_status"]
+            == "out_of_bounds_evidence"
+        ):
+
+            print(
+                "\nWARNING: Response contained "
+                "evidence outside the video duration."
+            )
+
         elif not parsed["validation_success"]:
 
             print(
@@ -1507,11 +2250,12 @@ def main():
                 "\nWARNING: Response contained "
                 "malformed evidence intervals."
             )
-  
+
         print_query_metrics(
             query_id,
             metrics
         )
+
         # --------------------------------------------------------------
         # Store completed query result
         # --------------------------------------------------------------
@@ -1519,6 +2263,7 @@ def main():
         results["queries"].append(
             query_result
         )
+
     # ------------------------------------------------------------------
     # Final summary
     # ------------------------------------------------------------------
@@ -1568,6 +2313,7 @@ def main():
         f"\nResults saved to:\n"
         f"{output_path}"
     )
+
 
 if __name__ == "__main__":
     main()

@@ -13,6 +13,21 @@ from datetime import datetime
 # Configuration
 # ======================================================================
 
+PROJECT_ROOT = "/home/las_edge_account/LAS-VICA"
+
+DEFAULT_PROMPT = os.path.join(
+    PROJECT_ROOT,
+    "prompts",
+    "experiment_b.txt"
+)
+
+DEFAULT_RESULTS_DIR = os.path.join(
+    PROJECT_ROOT,
+    "results",
+    "experiment_b"
+)
+
+
 MODEL_CONFIGS = {
 
     "cosmos_reason2": {
@@ -22,16 +37,22 @@ MODEL_CONFIGS = {
             "/workspace/models/cosmos-reason2/"
             "cosmos-reason2_infer.py"
         ),
+        "response_start": "=== Cosmos-Reason2 Response ===",
+        "response_end": "=== End Response ===",
     },
-        
+
     "cosmos3": {
         "display_name": "Cosmos3 Edge",
         "docker_image": "cosmos3-local",
-        "script": ("/workspace/models/cosmos3-edge/cosmos3_infer.py"
+        "script": (
+            "/workspace/models/cosmos3-edge/"
+            "cosmos3_infer.py"
         ),
+        "response_start": "=== Cosmos3 Edge Response ===",
+        "response_end": "=== End Response ===",
     },
 
-    # still need to implement Internvideo 2.5
+    # InternVideo 2.5 still needs to be implemented.
 }
 
 
@@ -65,17 +86,17 @@ def load_text(path):
 # Ground-truth evidence
 # ======================================================================
 
-def get_gt_intervals(
-    annotation,
-    query
-):
+def get_gt_intervals(query):
     """
-    Preliminary Experiment B ground-truth evidence.
+    Select the human-annotated evidence used for B-GT.
 
-    For now, use the annotation's relevant_segments.
+    Policy:
 
-    Later this function can prefer minimum_sufficient_intervals
-    once those annotations are available.
+        1. Use minimal_sufficient_intervals when available.
+        2. Otherwise use relevant_intervals.
+
+    relevant_segments are intentionally NOT used as a fallback because
+    the finalized annotations now contain explicit temporal intervals.
     """
 
     evidence = (
@@ -83,50 +104,37 @@ def get_gt_intervals(
         ["evidence"]
     )
 
-    # --------------------------------------------------------------
-    # Future behavior
-    # --------------------------------------------------------------
-
-    minimum_intervals = evidence.get(
-        "minimum_sufficient_intervals",
+    minimal_intervals = evidence.get(
+        "minimal_sufficient_intervals",
         []
     )
 
-    if minimum_intervals:
+    if minimal_intervals:
 
         return (
-            minimum_intervals,
-            "minimum_sufficient_intervals"
+            [
+                [float(start), float(end)]
+                for start, end in minimal_intervals
+            ],
+            "minimal_sufficient_intervals"
         )
 
-    # --------------------------------------------------------------
-    # Preliminary behavior
-    # --------------------------------------------------------------
-
-    relevant_segments = evidence.get(
-        "relevant_segments",
+    relevant_intervals = evidence.get(
+        "relevant_intervals",
         []
     )
 
-    intervals = []
+    if relevant_intervals:
 
-    for segment_index in relevant_segments:
-
-        start, end = annotation[
-            "timestamps"
-        ][segment_index]
-
-        intervals.append(
+        return (
             [
-                float(start),
-                float(end)
-            ]
+                [float(start), float(end)]
+                for start, end in relevant_intervals
+            ],
+            "relevant_intervals"
         )
 
-    return (
-        intervals,
-        "relevant_segments"
-    )
+    return [], "no_ground_truth_evidence"
 
 
 # ======================================================================
@@ -154,14 +162,15 @@ def find_experiment_a_query(
 
 def get_a_intervals(
     experiment_a,
-    query_id
+    query_id,
+    video_duration
 ):
     """
-    Extract the intervals selected by Experiment A.
+    Extract usable intervals selected by Experiment A.
 
-    Returns:
-        intervals
-        source_status
+    B-A should use the prediction that Experiment A actually produced.
+    However, structurally invalid or out-of-bounds evidence is not
+    passed into the reasoning model.
     """
 
     query_result = find_experiment_a_query(
@@ -179,6 +188,20 @@ def get_a_intervals(
     ):
 
         return [], "execution_failure"
+
+    response_status = query_result.get(
+        "response_status"
+    )
+
+    if response_status not in (
+        None,
+        "valid"
+    ):
+
+        return (
+            [],
+            f"experiment_a_{response_status}"
+        )
 
     parsed = query_result.get(
         "parsed_response"
@@ -210,7 +233,7 @@ def get_a_intervals(
             item,
             dict
         ):
-            continue
+            return [], "malformed_evidence"
 
         start = item.get("start")
         end = item.get("end")
@@ -219,22 +242,31 @@ def get_a_intervals(
             start,
             (int, float)
         ):
-            continue
+            return [], "malformed_evidence"
 
         if not isinstance(
             end,
             (int, float)
         ):
-            continue
+            return [], "malformed_evidence"
+
+        start = float(start)
+        end = float(end)
+
+        if start < 0:
+
+            return [], "out_of_bounds_evidence"
 
         if end < start:
-            continue
+
+            return [], "malformed_evidence"
+
+        if end > video_duration:
+
+            return [], "out_of_bounds_evidence"
 
         intervals.append(
-            [
-                float(start),
-                float(end)
-            ]
+            [start, end]
         )
 
     if not intervals:
@@ -254,9 +286,9 @@ def build_question(
 ):
 
     return (
-        f"{base_prompt}\n\n"
-        f"Analyst query: "
-        f"{analyst_query}"
+        f"{base_prompt.rstrip()}\n\n"
+        f"Analyst query:\n"
+        f"{analyst_query.strip()}"
     )
 
 
@@ -264,174 +296,6 @@ def build_question(
 # Model execution
 # ======================================================================
 
-def run_cosmos_reason2(
-    video_path,
-    question,
-    evidence_intervals,
-    sample_fps
-):
-
-    intervals_json = json.dumps(
-        evidence_intervals,
-        separators=(",", ":")
-    )
-
-    command = [
-        "docker",
-        "run",
-        "--rm",
-
-        "--runtime",
-        "nvidia",
-
-        "--ipc=host",
-
-        "--ulimit",
-        "memlock=-1",
-
-        "--ulimit",
-        "stack=67108864",
-
-        "-v",
-        (
-            "/home/las_edge_account/"
-            "LAS-VICA:/workspace"
-        ),
-
-        "--entrypoint",
-        "python3",
-
-        "cosmos-reason2",
-
-        (
-            "/workspace/models/"
-            "cosmos-reason2/"
-            "cosmos-reason2_infer.py"
-        ),
-
-        "--video-path",
-        video_path,
-
-        "--sample-fps",
-        str(sample_fps),
-
-        "--evidence-intervals",
-        intervals_json,
-
-        "--question",
-        question,
-    ]
-
-    print(
-        f"Running Cosmos-Reason2 "
-        f"with {len(evidence_intervals)} "
-        f"evidence interval(s)..."
-    )
-
-    completed = subprocess.run(
-        command,
-        capture_output=True,
-        text=True
-    )
-
-    return {
-        "execution_success":
-            completed.returncode == 0,
-
-        "return_code":
-            completed.returncode,
-
-        "stdout":
-            completed.stdout,
-
-        "stderr":
-            completed.stderr,
-    }
-
-def run_cosmos3(
-    video_path,
-    question,
-    evidence_intervals,
-    sample_fps
-):
-
-    intervals_json = json.dumps(
-        evidence_intervals,
-        separators=(",", ":")
-    )
-
-    command = [
-        "docker",
-        "run",
-        "--rm",
-
-        "--runtime",
-        "nvidia",
-
-        "--ipc=host",
-
-        "--ulimit",
-        "memlock=-1",
-
-        "--ulimit",
-        "stack=67108864",
-
-        "-v",
-        (
-            "/home/las_edge_account/"
-            "LAS-VICA:/workspace"
-        ),
-
-        "--entrypoint",
-        "python3",
-
-        "cosmos3-local",
-
-        (
-            "/workspace/models/"
-            "cosmos3-edge/"
-            "cosmos3_infer.py"
-        ),
-
-        "--video-path",
-        video_path,
-
-        "--sample-fps",
-        str(sample_fps),
-
-        "--evidence-intervals",
-        intervals_json,
-
-        "--question",
-        question,
-    ]
-
-    print(
-        f"Running Cosmos3 Edge "
-        f"with {len(evidence_intervals)} "
-        f"evidence interval(s)..."
-    )
-
-    completed = subprocess.run(
-        command,
-        capture_output=True,
-        text=True
-    )
-
-    return {
-        "execution_success":
-            completed.returncode == 0,
-
-        "return_code":
-            completed.returncode,
-
-        "stdout":
-            completed.stdout,
-
-        "stderr":
-            completed.stderr,
-    }
-    
 def run_model(
     model_name,
     video_path,
@@ -440,91 +304,174 @@ def run_model(
     sample_fps
 ):
 
-    if model_name == "cosmos_reason2":
+    if model_name not in MODEL_CONFIGS:
 
-        return run_cosmos_reason2(
-            video_path,
-            question,
-            evidence_intervals,
-            sample_fps
+        raise ValueError(
+            f"Unsupported model: {model_name}"
         )
 
-    elif model_name == "cosmos3":
+    config = MODEL_CONFIGS[
+        model_name
+    ]
 
-        return run_cosmos3(
-            video_path,
-            question,
-            evidence_intervals,
-            sample_fps
-        )
-
-    raise ValueError(
-        f"Unsupported model: {model_name}"
+    intervals_json = json.dumps(
+        evidence_intervals,
+        separators=(",", ":")
     )
+
+    command = [
+        "docker",
+        "run",
+        "--rm",
+
+        "--runtime",
+        "nvidia",
+
+        "--ipc=host",
+
+        "--ulimit",
+        "memlock=-1",
+
+        "--ulimit",
+        "stack=67108864",
+
+        "-v",
+        f"{PROJECT_ROOT}:/workspace",
+
+        "--entrypoint",
+        "python3",
+
+        config["docker_image"],
+
+        config["script"],
+
+        "--video-path",
+        video_path,
+
+        "--sample-fps",
+        str(sample_fps),
+
+        "--evidence-intervals",
+        intervals_json,
+
+        "--question",
+        question,
+    ]
+
+    print(
+        f"Running {config['display_name']} "
+        f"with {len(evidence_intervals)} "
+        f"evidence interval(s)..."
+    )
+
+    completed = subprocess.run(
+        command,
+        capture_output=True,
+        text=True
+    )
+
+    return {
+        "execution_success":
+            completed.returncode == 0,
+
+        "return_code":
+            completed.returncode,
+
+        "stdout":
+            completed.stdout,
+
+        "stderr":
+            completed.stderr,
+    }
 
 
 # ======================================================================
 # Extract model response
 # ======================================================================
 
-def extract_response_text(stdout):
+def extract_response_text(
+    stdout,
+    model_name
+):
+    """
+    Extract response text using the markers configured for
+    the selected model.
+    """
 
-    start_marker = (
-        "=== Cosmos-Reason2 Response ==="
+    config = MODEL_CONFIGS[
+        model_name
+    ]
+
+    start_marker = re.escape(
+        config["response_start"]
     )
 
-    end_marker = (
-        "=== End Response ==="
+    end_marker = re.escape(
+        config["response_end"]
     )
 
-    if start_marker not in stdout:
+    pattern = re.compile(
+        start_marker
+        + r"\s*(.*?)\s*"
+        + end_marker,
+        re.DOTALL
+    )
 
-        return stdout.strip()
+    match = pattern.search(
+        stdout
+    )
 
-    response = stdout.split(
-        start_marker,
-        1
-    )[1]
+    if match:
 
-    if end_marker in response:
+        return match.group(1).strip()
 
-        response = response.split(
-            end_marker,
-            1
-        )[0]
-
-    return response.strip()
+    return stdout.strip()
 
 
 # ======================================================================
 # JSON parsing
 # ======================================================================
 
+def strip_markdown_json_fence(text):
+
+    text = text.strip()
+
+    match = re.fullmatch(
+        r"```(?:json)?\s*(.*?)\s*```",
+        text,
+        flags=re.DOTALL | re.IGNORECASE
+    )
+
+    if match:
+
+        return match.group(1).strip()
+
+    return text
+
+
 def parse_json_response(text):
+    """
+    Experiment B answering contract:
+
+        {
+            "answer": "<natural-language answer>"
+        }
+
+    The answer remains natural language. Structured ground-truth
+    claims are NOT supplied to the answering model.
+    """
 
     if not text:
 
         return {
             "parse_success": False,
+            "validation_success": False,
             "parsed": None,
             "error": "empty response",
         }
 
-    cleaned = text.strip()
-
-    # Remove Markdown fences if present.
-
-    cleaned = re.sub(
-        r"^```(?:json)?\s*",
-        "",
-        cleaned,
-        flags=re.IGNORECASE
-    )
-
-    cleaned = re.sub(
-        r"\s*```$",
-        "",
-        cleaned
+    cleaned = strip_markdown_json_fence(
+        text
     )
 
     try:
@@ -533,12 +480,13 @@ def parse_json_response(text):
             cleaned
         )
 
-    except json.JSONDecodeError as e:
+    except json.JSONDecodeError as exc:
 
         return {
             "parse_success": False,
+            "validation_success": False,
             "parsed": None,
-            "error": str(e),
+            "error": str(exc),
         }
 
     if not isinstance(
@@ -547,7 +495,8 @@ def parse_json_response(text):
     ):
 
         return {
-            "parse_success": False,
+            "parse_success": True,
+            "validation_success": False,
             "parsed": parsed,
             "error": (
                 "response JSON must be an object"
@@ -569,6 +518,17 @@ def parse_json_response(text):
             "parsed": parsed,
             "error": (
                 "answer must be a string"
+            ),
+        }
+
+    if not answer.strip():
+
+        return {
+            "parse_success": True,
+            "validation_success": False,
+            "parsed": parsed,
+            "error": (
+                "answer must not be empty"
             ),
         }
 
@@ -602,10 +562,12 @@ def run_condition(
     }
 
     # --------------------------------------------------------------
-    # No evidence selected
+    # No evidence available
     #
-    # Do not run the model with an empty frame set.
-    # Preserve this as an Experiment-A evidence failure.
+    # Do not run the reasoning model with an empty evidence set.
+    #
+    # For B-A this preserves an upstream Experiment A failure.
+    # For B-GT this indicates an annotation/evidence problem.
     # --------------------------------------------------------------
 
     if not intervals:
@@ -675,11 +637,12 @@ def run_condition(
         return result
 
     # --------------------------------------------------------------
-    # Extract response
+    # Extract and parse response
     # --------------------------------------------------------------
 
     response_text = extract_response_text(
-        execution["stdout"]
+        execution["stdout"],
+        model_name
     )
 
     result[
@@ -692,31 +655,29 @@ def run_condition(
 
     result[
         "parse_success"
-    ] = parsed.get(
-        "parse_success",
-        False
-    )
+    ] = parsed[
+        "parse_success"
+    ]
 
     result[
         "validation_success"
-    ] = parsed.get(
-        "validation_success",
-        False
-    )
+    ] = parsed[
+        "validation_success"
+    ]
 
     result[
         "validation_error"
-    ] = parsed.get(
+    ] = parsed[
         "error"
-    )
+    ]
 
     result[
         "parsed_response"
-    ] = parsed.get(
+    ] = parsed[
         "parsed"
-    )
+    ]
 
-    if result[
+    if parsed[
         "validation_success"
     ]:
 
@@ -734,6 +695,44 @@ def run_condition(
 
 
 # ======================================================================
+# Console output
+# ======================================================================
+
+def print_condition_result(result):
+
+    if result.get(
+        "parsed_response"
+    ):
+
+        print(
+            json.dumps(
+                result[
+                    "parsed_response"
+                ],
+                indent=2,
+                ensure_ascii=False
+            )
+        )
+
+    elif result.get(
+        "raw_response"
+    ):
+
+        print(
+            result[
+                "raw_response"
+            ]
+        )
+
+    else:
+
+        print(
+            f"Status: "
+            f"{result['condition_status']}"
+        )
+
+
+# ======================================================================
 # Main
 # ======================================================================
 
@@ -742,7 +741,8 @@ def main():
     parser = argparse.ArgumentParser(
         description=(
             "Experiment B: answer analyst queries "
-            "from selected video evidence"
+            "from human-selected and "
+            "Experiment-A-selected evidence."
         )
     )
 
@@ -775,12 +775,12 @@ def main():
 
     parser.add_argument(
         "--prompt-file",
-        default="prompts/experiment_b.txt"
+        default=DEFAULT_PROMPT
     )
 
     parser.add_argument(
         "--results-dir",
-        default="results/experiment_b"
+        default=DEFAULT_RESULTS_DIR
     )
 
     args = parser.parse_args()
@@ -830,20 +830,22 @@ def main():
         )
 
     # --------------------------------------------------------------
-    # Video path
+    # Video path visible inside Docker
     # --------------------------------------------------------------
 
     video_file = annotation[
         "video_file"
     ]
 
-    # This is the path visible INSIDE Docker.
-
     video_path = (
         "/workspace/videos/"
         "counterfactual_vids/"
         "data/"
         f"{video_file}"
+    )
+
+    video_duration = float(
+        annotation["duration"]
     )
 
     # --------------------------------------------------------------
@@ -874,18 +876,37 @@ def main():
                 args.sample_fps,
 
             "prompt_file":
-                args.prompt_file,
+                os.path.relpath(
+                    os.path.abspath(
+                        args.prompt_file
+                    ),
+                    PROJECT_ROOT
+                ),
 
             "ground_truth_evidence_policy":
                 (
-                    "minimum_sufficient_intervals "
+                    "minimal_sufficient_intervals "
                     "if available, otherwise "
-                    "relevant_segments"
+                    "relevant_intervals"
                 ),
 
             "experiment_a_source":
                 os.path.abspath(
                     args.experiment_a
+                ),
+
+            "answer_contract":
+                {
+                    "answer":
+                        "natural-language string"
+                },
+
+            "evaluation_policy":
+                (
+                    "Structured answer evaluation "
+                    "is performed separately using "
+                    "the finalized annotation claims "
+                    "and temporal relations."
                 ),
         },
 
@@ -940,7 +961,6 @@ def main():
             gt_intervals,
             gt_source
         ) = get_gt_intervals(
-            annotation,
             query
         )
 
@@ -953,8 +973,17 @@ def main():
             a_status
         ) = get_a_intervals(
             experiment_a,
-            query_id
+            query_id,
+            video_duration
         )
+
+        # ----------------------------------------------------------
+        # Preserve complete evaluation ground truth
+        # ----------------------------------------------------------
+
+        ground_truth = query[
+            "ground_truth"
+        ]
 
         query_result = {
             "query_id":
@@ -970,26 +999,32 @@ def main():
 
             "ground_truth": {
                 "answer":
-                    query[
-                        "ground_truth"
-                    ].get(
+                    ground_truth.get(
                         "answer"
                     ),
 
                 "required_claims":
-                    query[
-                        "ground_truth"
-                    ].get(
+                    ground_truth.get(
                         "required_claims",
                         []
                     ),
 
+                "supporting_claims":
+                    ground_truth.get(
+                        "supporting_claims",
+                        []
+                    ),
+
                 "temporal_relations":
-                    query[
-                        "ground_truth"
-                    ].get(
+                    ground_truth.get(
                         "temporal_relations",
                         []
+                    ),
+
+                "evidence":
+                    ground_truth.get(
+                        "evidence",
+                        {}
                     ),
             },
 
@@ -1000,7 +1035,14 @@ def main():
         # B-GT
         # ==========================================================
 
-        print("\n--- B-GT: Human evidence ---")
+        print(
+            "\n--- B-GT: "
+            "Human-selected evidence ---"
+        )
+
+        print(
+            f"Evidence source: {gt_source}"
+        )
 
         print(
             "Evidence:",
@@ -1022,35 +1064,9 @@ def main():
             "ground_truth_evidence"
         ] = b_gt
 
-        if b_gt.get(
-            "parsed_response"
-        ):
-
-            print(
-                json.dumps(
-                    b_gt[
-                        "parsed_response"
-                    ],
-                    indent=2
-                )
-            )
-
-        elif b_gt.get(
-            "raw_response"
-        ):
-
-            print(
-                b_gt[
-                    "raw_response"
-                ]
-            )
-
-        else:
-
-            print(
-                f"Status: "
-                f"{b_gt['condition_status']}"
-            )
+        print_condition_result(
+            b_gt
+        )
 
         # ==========================================================
         # B-A
@@ -1059,6 +1075,10 @@ def main():
         print(
             "\n--- B-A: "
             "Experiment A evidence ---"
+        )
+
+        print(
+            f"Experiment A status: {a_status}"
         )
 
         print(
@@ -1084,41 +1104,66 @@ def main():
             "model_selected_evidence"
         ] = b_a
 
-        if b_a.get(
-            "parsed_response"
-        ):
-
-            print(
-                json.dumps(
-                    b_a[
-                        "parsed_response"
-                    ],
-                    indent=2
-                )
-            )
-
-        elif b_a.get(
-            "raw_response"
-        ):
-
-            print(
-                b_a[
-                    "raw_response"
-                ]
-            )
-
-        else:
-
-            print(
-                f"Status: "
-                f"{b_a['condition_status']}"
-            )
+        print_condition_result(
+            b_a
+        )
 
         results[
             "queries"
         ].append(
             query_result
         )
+
+    # --------------------------------------------------------------
+    # Condition summary
+    # --------------------------------------------------------------
+
+    gt_valid = sum(
+        1
+        for query in results["queries"]
+        if (
+            query["conditions"]
+            ["ground_truth_evidence"]
+            ["condition_status"]
+            == "valid"
+        )
+    )
+
+    a_valid = sum(
+        1
+        for query in results["queries"]
+        if (
+            query["conditions"]
+            ["model_selected_evidence"]
+            ["condition_status"]
+            == "valid"
+        )
+    )
+
+    a_no_evidence = sum(
+        1
+        for query in results["queries"]
+        if (
+            query["conditions"]
+            ["model_selected_evidence"]
+            ["condition_status"]
+            == "no_evidence_available"
+        )
+    )
+
+    results["summary"] = {
+        "total_queries":
+            len(results["queries"]),
+
+        "ground_truth_evidence_valid_outputs":
+            gt_valid,
+
+        "model_selected_evidence_valid_outputs":
+            a_valid,
+
+        "model_selected_no_evidence":
+            a_no_evidence,
+    }
 
     # --------------------------------------------------------------
     # Save
@@ -1157,6 +1202,10 @@ def main():
             ensure_ascii=False
         )
 
+    # --------------------------------------------------------------
+    # Final console summary
+    # --------------------------------------------------------------
+
     print("\n")
     print("=" * 60)
     print("Experiment B Complete")
@@ -1175,6 +1224,21 @@ def main():
     print(
         f"Queries: "
         f"{len(results['queries'])}"
+    )
+
+    print(
+        f"B-GT valid outputs: "
+        f"{gt_valid}/{len(results['queries'])}"
+    )
+
+    print(
+        f"B-A valid outputs:  "
+        f"{a_valid}/{len(results['queries'])}"
+    )
+
+    print(
+        f"B-A no evidence:    "
+        f"{a_no_evidence}/{len(results['queries'])}"
     )
 
     print(
