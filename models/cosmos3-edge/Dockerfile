@@ -31,7 +31,7 @@ RUN mkdir -p /opt/scripts/cosmos3-edge
 RUN mkdir -p /opt/models/cosmos3-edge
 
 # Copy your Cosmos-3 Edge model files into the image
-COPY model /opt/models/cosmos3-edge/
+COPY models /opt/models/cosmos3-edge/
 
 # Copy your query script (same pattern as Reason2)
 COPY run_cosmos3_query.sh /opt/scripts/cosmos3-edge/run_cosmos3_query.sh

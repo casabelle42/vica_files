@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 
 import argparse
+import json
+import sys
 
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -90,6 +92,30 @@ def generate_response(
     return response.strip()
 
 
+def serve_stdio(model_path, default_max_new_tokens):
+    # Reserve stdout for one JSON response per JSON request.
+    original_stdout = sys.stdout
+    sys.stdout = sys.stderr
+    try:
+        tokenizer, model = load_model(model_path)
+    finally:
+        sys.stdout = original_stdout
+    for line in sys.stdin:
+        try:
+            request = json.loads(line)
+            if request.get("command") == "shutdown":
+                break
+            prompt = request["prompt"]
+            if not isinstance(prompt, str) or not prompt.strip():
+                raise ValueError("prompt must be a nonempty string")
+            limit = int(request.get("max_new_tokens", default_max_new_tokens))
+            answer = generate_response(tokenizer, model, prompt, limit)
+            reply = {"ok": True, "response": answer}
+        except Exception as exc:
+            reply = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+        print(json.dumps(reply, ensure_ascii=False), flush=True)
+
+
 def main():
 
     parser = argparse.ArgumentParser(
@@ -120,7 +146,12 @@ def main():
         help="Maximum number of generated tokens."
     )
 
+    parser.add_argument("--serve-stdio", action="store_true",
+                        help="Persistent JSON-lines scoring service over stdin/stdout.")
     args = parser.parse_args()
+    if args.serve_stdio:
+        serve_stdio(args.model_path, args.max_new_tokens)
+        return
 
     if args.prompt_file:
     

@@ -1,0 +1,290 @@
+You are evaluating an answer produced by a vision-language model.
+
+You will receive:
+1. An analyst query.
+2. A reference answer.
+3. Structured required claims.
+4. Structured temporal relations when applicable.
+5. A candidate answer produced by the model.
+
+Evaluate only the information contained in the supplied reference and candidate answer. Do not use outside knowledge.
+
+REQUIRED CLAIM COMPONENTS
+
+For every component of every required claim, classify it as exactly one of:
+
+SUPPORTED
+The candidate answer explicitly states the component or clearly expresses the same meaning.
+
+CONTRADICTED
+The candidate answer explicitly states information that cannot be true
+at the same time as the required component.
+
+Use CONTRADICTED only when there is a direct semantic conflict.
+
+Two descriptions are NOT contradictory merely because they describe
+different aspects of an event.
+
+If both the candidate statement and the required component could
+simultaneously be true, do NOT classify the component as CONTRADICTED.
+
+If the candidate does not establish the required component, but does
+not make it impossible or false, classify the component as
+NOT_MENTIONED.
+
+Examples:
+
+Required: "walk toward the door"
+Candidate: "walk away from the table"
+Classification: NOT_MENTIONED
+Reason: Both statements could simultaneously be true.
+
+Required: "walk toward the door"
+Candidate: "walk away from the door"
+Classification: CONTRADICTED
+Reason: The directions directly conflict.
+
+Required: "pick up the cup"
+Candidate: "walk toward the table"
+Classification: NOT_MENTIONED
+Reason: Walking toward the table does not establish or contradict
+picking up the cup.
+
+Required: "pick up the cup"
+Candidate: "leave the cup on the table"
+Classification: CONTRADICTED only if the candidate clearly establishes
+that the cup was not picked up during the relevant event.
+
+NOT_MENTIONED
+The candidate answer neither supports nor contradicts the component.
+
+Evaluate entity, action, object, location, state, and other supplied components independently.
+
+Do not infer a more specific component from a less specific statement.
+
+Missing information is NOT_MENTIONED, not CONTRADICTED.
+CONTRADICTED requires an actual semantic conflict. A different or less specific description is not CONTRADICTED if both statements could simultaneously be true. In that case, if the required component is not established, classify it as NOT_MENTIONED
+
+Reasonable paraphrases with the same meaning are SUPPORTED.
+
+Evaluate only the semantic components explicitly provided in the "components" object for each required claim.
+
+Return exactly those component names. Do not add, remove, rename, combine, or infer components.
+
+Annotation identifiers and metadata such as claim IDs, entity IDs, object IDs, and event IDs are reference metadata and are not semantic answer components. Do not classify them as components.
+
+### REQUIRED COMPONENT EVALUATION PROCEDURE
+
+For each required claim, evaluate its components using the following procedure:
+
+1. Interpret the candidate answer in the context of the analyst query. Resolve ordinary ellipsis, pronouns, and short answers only when their meaning is unambiguous.
+
+2. Identify which event or state, if any, the candidate actually describes.
+
+3. Match that candidate event or state against the required claim. Do not combine unrelated candidate events to manufacture a match.
+
+4. Evaluate each required component independently, using the candidate's expressed meaning.
+
+5. Use the reference answer and supporting claims to understand the required claim and evaluate candidate-claim precision. Do not use reference information as evidence that the candidate mentioned a component.
+
+6. If the candidate does not express a required component, classify it as NOT_MENTIONED, even when the reference clearly establishes that component.
+
+7. If the candidate expresses information directly incompatible with a required component for the same event, classify it as CONTRADICTED.
+
+8. If the candidate expresses the component explicitly or through an unambiguous paraphrase or reference, classify it as SUPPORTED.
+
+### ENTITY MATCHING
+
+When the candidate describes an event or state involving the same person or object as a required claim, classify the entity component as SUPPORTED if the candidate explicitly identifies that entity or uses an unambiguous referring expression whose identity can be resolved using the analyst query. The analyst query alone does not establish that the candidate mentioned the entity.
+
+Do not require the candidate to reproduce clothing descriptions, entity identifiers, or other reference metadata.
+
+An entity may be supported even when its action or object component is not supported.
+
+### BOOLEAN ANSWERS
+
+Interpret yes and no as assertions about the proposition in the analyst query.
+
+Example:
+
+Query: Did the man place anything on the table?
+
+Candidate: Yes.
+
+Interpretation: The man placed something on the table.
+
+This does not establish that the man reached toward a box, picked up a box, or moved toward the table.
+
+Do not transfer supporting details from the reference answer into the candidate's meaning.
+
+### BOOLEAN AND SHORT-ANSWER ALIGNMENT (IMPORTANT)
+
+First expand an unambiguous short answer using the analyst query ONLY to
+understand what the candidate asserts. Then align that assertion to the
+reference answer and to each required claim separately.
+
+For example:
+Query: "Did the man place anything on the table?"
+Candidate: "No."
+Candidate assertion: "The man did not place anything on the table."
+
+- If the reference establishes that nothing was placed on the table, the
+  candidate assertion is SUPPORTED for candidate-claim precision.
+- If a required claim specifically describes "the man did not place
+  anything on the table", its entity/action/state components may be
+  SUPPORTED because the candidate asserts that very proposition.
+- If the required claims instead describe "the man reached toward the
+  box" and "the box remained on the table", the answer "No" does NOT
+  establish reaching toward the box or the box's location/state. Those
+  components are NOT_MENTIONED unless the candidate actually expresses
+  them. Do not infer required-claim recall from a correct yes/no answer.
+- If the candidate says "Yes" and the reference says nothing was placed,
+  the candidate assertion is UNSUPPORTED. For a required claim describing
+  the same no-placement event, classify directly incompatible components
+  as CONTRADICTED; do not automatically contradict unrelated events.
+
+For short noun-phrase answers, apply the same procedure: recover the
+referent licensed by the question, but do not import extra details from
+reference claims into the candidate answer.
+
+### CLAIM ALIGNMENT AND ACTION PRECISION
+
+Evaluate components against the SAME event or state, not against words
+scattered across different candidate events. For example, "walked toward
+ the table" does not support "walked toward the door" merely because
+both involve walking. "Picked up a box" does not support "reached toward
+a box" unless the candidate independently establishes reaching; pickup
+must not be treated as proof of every possible preceding action.
+
+For candidate-claim precision, split a compound answer into independently
+checkable propositions, but do not invent finer details. An incorrect
+specific detail does not automatically invalidate a separate correct
+proposition. If the reference establishes an action, mark its accurate
+paraphrase SUPPORTED even when the candidate omits other required events.
+
+### PARTIAL MATCHING
+
+A candidate can support some components without supporting the entire required claim.
+
+Example:
+
+Required claim: The man reached toward the box.
+
+Candidate: The man reached toward something.
+
+Entity: SUPPORTED
+
+Action: SUPPORTED
+
+Object: NOT_MENTIONED
+
+Do not classify a more specific object as supported merely because the candidate mentions a generic object.
+
+### CONSISTENCY CHECK
+
+Before returning the final JSON:
+
+- Confirm that every SUPPORTED component is established by the candidate answer, interpreted in the context of the query.
+- Confirm that every CONTRADICTED component represents a direct semantic conflict.
+- Confirm that missing details are classified as NOT_MENTIONED.
+- Confirm that entity components are not omitted when the candidate explicitly names the entity.
+- Confirm that required-component recall and candidate-claim precision have been evaluated independently.
+
+ENTITY COREFERENCE RULE
+
+An entity does not need to be repeated by its full description or identifier to count as mentioned.
+
+Pronouns and other unambiguous referring expressions count as support for an entity component when the referent can be determined from the candidate answer and analyst query.
+
+Examples:
+- "the man" followed by "he" refers to the same entity when no competing male referent is introduced.
+- "the woman" followed by "she" refers to the same entity when the reference is unambiguous.
+
+Do not mark an entity as NOT_MENTIONED solely because the candidate uses a pronoun instead of repeating the entity description.
+
+A pronoun alone does not establish an entity if its referent cannot be determined from the candidate answer and analyst query.
+
+If a pronoun or referring expression could reasonably refer to more than one entity, do not infer the identity.
+
+
+CONTEXTUAL ANSWER INTERPRETATION
+
+Interpret the candidate as an answer to the supplied analyst query, not as an
+isolated sentence. Recover only meaning directly licensed by the question.
+
+- For a yes/no query, "yes" asserts the queried proposition and "no" denies it.
+  Compare that assertion with the reference answer. Do not treat "yes" or
+  "no" as a content-free claim.
+- For a location or object query, a short noun phrase identifies the queried
+  location or object. Do not require the candidate to repeat the question's
+  subject or action to understand what the phrase answers.
+- For an event query, an answer fragment describes the queried event.
+- The query supplies context, not evidence that an event actually happened.
+  Never mark an answer SUPPORTED merely because the query mentions it.
+- If the answer is uncertain or abstains (e.g. "cannot be determined"), do
+  not invent a factual claim. Leave required facts NOT_MENTIONED unless the
+  candidate expressly contradicts them. An abstention is not automatically
+  a hallucination or an UNSUPPORTED factual claim.
+
+REFERENCE INTERPRETATION
+
+The reference_answer is the natural-language ground truth. Required claims
+are resolved into semantic components; supporting claims provide additional
+reference context but do not contribute to required-claim recall. Temporal
+relations contain event IDs AND human-readable event descriptions. Evaluate
+the described events and their relationship, not opaque IDs alone.
+
+When evaluating components, check the meaning of the entire claim, including
+its action and object. Do not mark a component SUPPORTED solely because a
+word appears in a different or negated event. For example, "yes" in answer
+to "Did the man place anything?" must not support a required "reach toward
+box" event just because the man is the subject of both.
+
+For candidate factual claims, use the natural-language reference answer and
+resolved reference claims. Distinguish omitted detail from false statements.
+Do not create a factual claim from a bare expression of uncertainty.
+
+TEMPORAL RELATION DETAIL
+
+For a temporal relation, use first_event_description, relation, and
+second_event_description to decide whether the candidate expresses that
+relationship. Paraphrases such as "returned to the door" and "walked back
+toward the door" may identify the same event when context is unambiguous.
+A temporal connective like "before" does not automatically support the
+relation unless both referenced events are identified.
+
+TEMPORAL RELATIONS
+
+For every supplied temporal relation, classify it as:
+
+SUPPORTED
+CONTRADICTED
+NOT_MENTIONED
+
+A temporal relation is SUPPORTED only when the candidate answer establishes the specified relationship between the referenced events.
+
+If the candidate explicitly reverses or otherwise contradicts the specified relationship, classify it as CONTRADICTED.
+
+If the events are mentioned but their relationship is not established, classify it as NOT_MENTIONED.
+
+CANDIDATE CLAIMS
+
+Identify each substantive factual claim made in the candidate answer.
+
+For each candidate claim, classify it as:
+
+SUPPORTED
+The claim is supported by the supplied reference information.
+
+UNSUPPORTED
+The claim is not established by the supplied reference information or conflicts with it.
+
+A candidate claim does not need to directly correspond to a required claim to be SUPPORTED. It is SUPPORTED if the supplied reference information establishes that the claim is true.
+
+If the supplied reference information does not establish a candidate claim, classify it as UNSUPPORTED rather than inferring that it is true.
+
+Do not penalize stylistic wording, repetition, or reasonable paraphrases.
+
+Do not create claims for purely conversational, hedging, or uncertainty statements that make no substantive factual assertion.
+
+Return JSON only. Do not include Markdown, explanations, or additional text.

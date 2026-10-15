@@ -10,7 +10,7 @@ import sys
 from datetime import datetime
 
 
-PROJECT_ROOT = "/home/las_edge_account/LAS-VICA"
+PROJECT_ROOT = "/media/las_edge_account/Database/LAS-VICA"
 
 DEFAULT_PROMPT = os.path.join(
     PROJECT_ROOT,
@@ -35,6 +35,13 @@ MODEL_CONFIGS = {
         "container": "cosmos3-local",
         "script": "/workspace/models/cosmos3-edge/cosmos3_infer.py",
         "response_start": "=== Cosmos3 Edge Response ===",
+        "response_end": "=== End Response ===",
+    },
+    "internvideo2_5": {
+        "display_name": "InternVideo2.5 Chat 8B",
+        "container": "internvideo2_5-local",
+        "script": "/workspace/models/internvideo2_5/internvideo2_5_experiment_infer.py",
+        "response_start": "=== InternVideo2.5 Response ===",
         "response_end": "=== End Response ===",
     },
     "cosmos_reason2": {
@@ -221,6 +228,19 @@ def run_model(
     }
 
 
+# Extract sampling diagnostics emitted by InternVideo2.5 on stderr.
+# Keep the original stderr untouched for troubleshooting.
+def extract_sampling_metadata(stderr):
+    prefix = "INTERNVIDEO2_5_SAMPLING_METADATA="
+    for line in stderr.splitlines():
+        if line.startswith(prefix):
+            try:
+                return json.loads(line[len(prefix):])
+            except json.JSONDecodeError:
+                return None
+    return None
+
+
 # ----------------------------------------------------------------------
 # Extract model response
 # ----------------------------------------------------------------------
@@ -394,7 +414,14 @@ def parse_experiment_a_response(response_text):
             data,
             "Top-level response is not an object"
         )
-
+    # Normalize omitted evidence for insufficient-evidence responses.
+    # The original raw model response remains unchanged.
+    if (
+        data.get("sufficient_evidence_identified") is False
+        and "evidence" not in data
+    ):
+        data["evidence"] = []
+        
     sufficient = data.get(
         "sufficient_evidence_identified"
     )
@@ -1935,6 +1962,11 @@ def main():
             args.sample_fps
         )
 
+        sampling_metadata = (
+            extract_sampling_metadata(model_run["stderr"])
+            if args.model == "internvideo2_5" else None
+        )
+
         # --------------------------------------------------------------
         # Container/model execution failure
         # --------------------------------------------------------------
@@ -1972,6 +2004,8 @@ def main():
 
                 "stderr":
                     model_run["stderr"],
+
+                "sampling_metadata": sampling_metadata,
 
                 "parse_success":
                     False,
@@ -2056,6 +2090,8 @@ def main():
 
             "raw_response":
                 response_text,
+
+            "sampling_metadata": sampling_metadata,
 
             "parse_success":
                 parsed["parse_success"],
@@ -2170,7 +2206,7 @@ def main():
         #     metrics = None.
         # --------------------------------------------------------------
 
-        if usable_evidence:
+        if usable_evidence and query_result["validation_success"]:
 
             metrics = calculate_metrics(
                 evidence_gt,

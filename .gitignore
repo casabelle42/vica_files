@@ -32,6 +32,7 @@ dist/
 # =========================
 # Logs
 # =========================
+logs/
 *.log
 
 # =========================
@@ -54,12 +55,19 @@ synthetic_datasets/
 datasets/
 outputs/
 output/
-
+results/
+old/
+Edge/
+Host_Team/
+Network/
+:
 # Large generated images
 *.png
 *.jpg
 *.jpeg
 *.exr
+*.MOV
+videos/
 
 # Metadata outputs
 *.json
@@ -79,6 +87,7 @@ output/
 *.onnx
 *.engine
 *.ckpt
+ai_models/
 
 # =========================
 # Temporary Files

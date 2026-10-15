@@ -33,3 +33,4 @@ How can distributed vision-language AI systems maximize intelligence extraction 
   - Hosts the **MQTT broker** and server components that route messages/data between host and edges.
   - May also host an upload/collection service for returned frames and status updates.
 # vica_internvideo
+# vica_files

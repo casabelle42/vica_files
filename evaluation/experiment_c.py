@@ -6,6 +6,8 @@ import json
 import os
 import re
 import subprocess
+import math
+import tempfile
 
 from datetime import datetime
 
@@ -14,7 +16,7 @@ from datetime import datetime
 # Configuration
 # ======================================================================
 
-PROJECT_ROOT = "/home/las_edge_account/LAS-VICA"
+PROJECT_ROOT = "/media/las_edge_account/Database/LAS-VICA"
 CONTAINER_PROJECT_ROOT = "/workspace"
 
 DEFAULT_VIDEO_DIR = os.path.join(
@@ -83,7 +85,15 @@ MODEL_CONFIG = {
             "=== End Response ===",
     },
 
-    # InternVideo 2.5 still needs to be implemented.
+    "internvideo2_5": {
+        "display_name": "InternVideo2.5 Chat 8B",
+        # Override with environment variables if the Experiment A image,
+        # inference path, or response markers use different values.
+        "container": "internvideo2_5-local",
+        "script": "/workspace/models/internvideo2_5/internvideo2_5_experiment_infer.py",
+        "response_start": "=== InternVideo2.5 Response ===",
+        "response_end": "=== End Response ===",
+    },
 }
 
 
@@ -114,24 +124,17 @@ def load_text(path):
 
 
 def save_json(data, path):
-
-    os.makedirs(
-        os.path.dirname(path),
-        exist_ok=True
-    )
-
-    with open(
-        path,
-        "w",
-        encoding="utf-8"
-    ) as f:
-
-        json.dump(
-            data,
-            f,
-            indent=2,
-            ensure_ascii=False
-        )
+    """Atomically save a checkpoint, avoiding truncated results on interruption."""
+    directory = os.path.dirname(os.path.abspath(path))
+    os.makedirs(directory, exist_ok=True)
+    fd, temporary = tempfile.mkstemp(prefix=".experiment_c_", suffix=".tmp", dir=directory)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(data, handle, indent=2, ensure_ascii=False)
+        os.replace(temporary, path)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
 
 
 # ======================================================================
@@ -384,91 +387,33 @@ def strip_markdown_json_fence(text):
 
 
 def parse_json_response(text):
-    """
-    Experiment C uses the same answer contract as Experiment B:
+    """Parse the last JSON answer object, allowing preceding reasoning text."""
+    if not text or not text.strip():
+        return {"parse_success": False, "validation_success": False,
+                "parsed": None, "error": "empty response"}
 
-        {
-            "answer": "<natural-language answer>"
-        }
+    cleaned = strip_markdown_json_fence(text)
+    decoder = json.JSONDecoder()
+    candidates = []
+    for match in re.finditer(r"\{", cleaned):
+        try:
+            candidate, _ = decoder.raw_decode(cleaned, match.start())
+        except json.JSONDecodeError:
+            continue
+        if isinstance(candidate, dict):
+            candidates.append(candidate)
 
-    Structured scoring is performed separately by the automated
-    answer evaluator.
-    """
+    if not candidates:
+        return {"parse_success": False, "validation_success": False,
+                "parsed": None, "error": "no valid JSON object found"}
 
-    if not text:
-
-        return {
-            "parse_success": False,
-            "validation_success": False,
-            "parsed": None,
-            "error": "empty response",
-        }
-
-    cleaned = strip_markdown_json_fence(
-        text
-    )
-
-    try:
-
-        parsed = json.loads(
-            cleaned
-        )
-
-    except json.JSONDecodeError as exc:
-
-        return {
-            "parse_success": False,
-            "validation_success": False,
-            "parsed": None,
-            "error": str(exc),
-        }
-
-    if not isinstance(
-        parsed,
-        dict
-    ):
-
-        return {
-            "parse_success": True,
-            "validation_success": False,
-            "parsed": parsed,
-            "error":
-                "response JSON must be an object",
-        }
-
-    answer = parsed.get(
-        "answer"
-    )
-
-    if not isinstance(
-        answer,
-        str
-    ):
-
-        return {
-            "parse_success": True,
-            "validation_success": False,
-            "parsed": parsed,
-            "error":
-                "answer must be a string",
-        }
-
-    if not answer.strip():
-
-        return {
-            "parse_success": True,
-            "validation_success": False,
-            "parsed": parsed,
-            "error":
-                "answer must not be empty",
-        }
-
-    return {
-        "parse_success": True,
-        "validation_success": True,
-        "parsed": parsed,
-        "error": None,
-    }
+    parsed = candidates[-1]
+    answer = parsed.get("answer")
+    if not isinstance(answer, str) or not answer.strip():
+        return {"parse_success": True, "validation_success": False,
+                "parsed": parsed, "error": "answer must be a nonempty string"}
+    return {"parse_success": True, "validation_success": True,
+            "parsed": parsed, "error": None}
 
 
 # ======================================================================
@@ -668,6 +613,24 @@ def run_model(
                 else "invalid_output"
             ),
     }
+
+
+def extract_actual_evidence(stdout):
+    """Read the frame timestamps and source indices reported by inference scripts."""
+    result = {"actual_frame_timestamps": None, "actual_source_frame_indices": None,
+              "actual_frame_count": None}
+    for label, key in (("Frame timestamps:", "actual_frame_timestamps"),
+                       ("Source frame indices:", "actual_source_frame_indices")):
+        match = re.search(r"(?m)^" + re.escape(label) + r"\s*\n\s*(\[[^\n]*\])", stdout)
+        if match:
+            try:
+                result[key] = json.loads(match.group(1))
+            except json.JSONDecodeError:
+                pass
+    match = re.search(r"(?m)^Frames extracted:\s*(\d+)", stdout)
+    if match:
+        result["actual_frame_count"] = int(match.group(1))
+    return result
 
 
 # ======================================================================
@@ -1086,6 +1049,23 @@ def main():
         )
     )
 
+    parser.add_argument(
+        "--resume", action="store_true",
+        help="Resume an existing checkpoint; requires --output-file"
+    )
+    parser.add_argument(
+        "--output-file", default=None,
+        help="Stable JSON output path (recommended for resumable runs)"
+    )
+    parser.add_argument(
+        "--retry-failed", action="store_true",
+        help="With --resume, retry failed or invalid conditions"
+    )
+    parser.add_argument(
+        "--force", action="store_true",
+        help="With --resume, rerun every selected condition"
+    )
+
     args = parser.parse_args()
 
     # ------------------------------------------------------------------
@@ -1136,6 +1116,18 @@ def main():
 
     video_duration = float(
         annotation["duration"]
+    )
+
+    if args.sample_fps <= 0 or not math.isfinite(args.sample_fps):
+        raise ValueError("--sample-fps must be finite and positive")
+
+    if args.resume and not args.output_file:
+        parser.error("--resume requires --output-file")
+
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    output_path = args.output_file or os.path.join(
+        args.output_dir,
+        f"{annotation['video_id']}_{args.model}_{timestamp}.json"
     )
 
     # ------------------------------------------------------------------
@@ -1197,6 +1189,21 @@ def main():
 
         "queries": []
     }
+
+    if args.resume and os.path.isfile(output_path):
+        previous = load_json(output_path)
+        if (previous.get("experiment") != "C"
+                or previous.get("video_id") != annotation["video_id"]
+                or previous.get("model") != args.model
+                or previous.get("configuration", {}).get("sample_fps") != args.sample_fps
+                or previous.get("configuration", {}).get("prompt_file")
+                   != results["configuration"]["prompt_file"]):
+            raise ValueError("Checkpoint experiment/video/model/FPS/prompt mismatch")
+        results = previous
+    elif os.path.exists(output_path):
+        raise FileExistsError(
+            f"Output already exists: {output_path}. Use --resume or another --output-file"
+        )
 
     # ------------------------------------------------------------------
     # Select queries
@@ -1284,6 +1291,11 @@ def main():
             "ground_truth"
         ]
 
+        existing_query = next(
+            (item for item in results["queries"] if item.get("query_id") == query_id),
+            None
+        )
+
         query_result = {
             "query_id":
                 query_id,
@@ -1330,6 +1342,9 @@ def main():
             "conditions": {}
         }
 
+        if existing_query is not None:
+            query_result = existing_query
+
         # --------------------------------------------------------------
         # Select conditions
         # --------------------------------------------------------------
@@ -1372,6 +1387,13 @@ def main():
                 query,
                 annotation
             )
+
+            previous_condition = query_result["conditions"].get(condition_name)
+            if previous_condition and not args.force:
+                status = previous_condition.get("condition_status")
+                if (not args.retry_failed or status == "valid"):
+                    print(f"Skipping {query_id}/{condition_name}: checkpoint status {status}")
+                    continue
 
             print_condition_header(
                 condition_name,
@@ -1495,17 +1517,15 @@ def main():
                         "stdout"
                     ],
 
-                "stderr":
-                    model_result[
-                        "stderr"
-                    ]
+                "stderr": model_result["stderr"],
+                **extract_actual_evidence(model_result["stdout"])
             }
 
-        results[
-            "queries"
-        ].append(
-            query_result
-        )
+            if existing_query is None and query_result not in results["queries"]:
+                results["queries"].append(query_result)
+            save_json(results, output_path)
+
+        save_json(results, output_path)
 
     # ------------------------------------------------------------------
     # Summary
@@ -1569,21 +1589,6 @@ def main():
     # ------------------------------------------------------------------
     # Save
     # ------------------------------------------------------------------
-
-    timestamp = datetime.now().strftime(
-        "%Y%m%d_%H%M%S"
-    )
-
-    output_filename = (
-        f"{annotation['video_id']}_"
-        f"{args.model}_"
-        f"{timestamp}.json"
-    )
-
-    output_path = os.path.join(
-        args.output_dir,
-        output_filename
-    )
 
     save_json(
         results,

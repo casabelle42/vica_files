@@ -13,7 +13,7 @@ from datetime import datetime
 # Configuration
 # ======================================================================
 
-PROJECT_ROOT = "/home/las_edge_account/LAS-VICA"
+PROJECT_ROOT = "/media/las_edge_account/Database/LAS-VICA"
 
 DEFAULT_PROMPT = os.path.join(
     PROJECT_ROOT,
@@ -52,7 +52,14 @@ MODEL_CONFIGS = {
         "response_end": "=== End Response ===",
     },
 
-    # InternVideo 2.5 still needs to be implemented.
+    "internvideo2_5": {
+        "display_name": "InternVideo2.5 Chat 8B",
+        "docker_image": "internvideo2_5-local",
+        "script": "/workspace/models/internvideo2_5/internvideo2_5_experiment_infer.py",
+        "response_start": "=== InternVideo2.5 Response ===",
+        "response_end": "=== End Response ===",
+    },
+
 }
 
 

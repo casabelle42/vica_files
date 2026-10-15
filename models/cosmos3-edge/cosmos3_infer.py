@@ -488,7 +488,8 @@ def load_model_and_processor(
         AutoModelForImageTextToText.from_pretrained(
             model_path,
             dtype=torch.float16,
-            device_map="auto",
+            #device_map="auto",
+            device_map={"": "cuda:0"},
             trust_remote_code=True,
             local_files_only=True
         )
